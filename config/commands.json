@@ -1,0 +1,39 @@
+{
+    "commands": [
+        {
+            "name": "PING",
+            "handler": "ping",
+            "min_args": 0,
+            "max_args": 0,
+            "description": "Returns PONG"
+        },
+        {
+            "name": "ECHO",
+            "handler": "echo",
+            "min_args": 1,
+            "max_args": 1,
+            "description": "Returns the given argument"
+        },
+        {
+            "name": "SET",
+            "handler": "set",
+            "min_args": 2,
+            "max_args": 6,
+            "description": "Set key to value"
+        },
+        {
+            "name": "GET",
+            "handler": "get",
+            "min_args": 1,
+            "max_args": 1,
+            "description": "Get value of key"
+        },
+        {
+            "name": "DEL",
+            "handler": "del",
+            "min_args": 1,
+            "max_args": -1,
+            "description": "Delete keys"
+        }
+    ]
+}
