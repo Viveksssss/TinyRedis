@@ -16,6 +16,20 @@ public:
     static std::string set(const std::vector<std::string>& args);
     static std::string get(const std::vector<std::string>& args);
     static std::string del(const std::vector<std::string>& args);
+
+    // 列表命令
+    static std::string rpush(const std::vector<std::string>& args);
+    static std::string lpush(const std::vector<std::string>& args);
+    static std::string llen(const std::vector<std::string>& args);
+    static std::string lrange(const std::vector<std::string>& args);
+    static std::string lindex(const std::vector<std::string>& args);
+    static std::string lset(const std::vector<std::string>& args);
+    static std::string lpop(const std::vector<std::string>& args);
+    static std::string rpop(const std::vector<std::string>& args);
+    static std::string lrem(const std::vector<std::string>& args);
+    static std::string ltrim(const std::vector<std::string>& args);
+    static std::string blpop(const std::vector<std::string>& args);
+    static std::string brpop(const std::vector<std::string>& args);
 };
 
 }
