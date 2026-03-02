@@ -34,6 +34,90 @@
             "min_args": 1,
             "max_args": -1,
             "description": "Delete keys"
+        },
+        {
+            "name": "RPUSH",
+            "handler": "rpush",
+            "min_args": 2,
+            "max_args": -1,
+            "description": "Append one or multiple elements to a list"
+        },
+        {
+            "name": "LPUSH",
+            "handler": "lpush",
+            "min_args": 2,
+            "max_args": -1,
+            "description": "Prepend one or multiple elements to a list"
+        },
+        {
+            "name": "LLEN",
+            "handler": "llen",
+            "min_args": 1,
+            "max_args": 1,
+            "description": "Get the length of a list"
+        },
+        {
+            "name": "LRANGE",
+            "handler": "lrange",
+            "min_args": 3,
+            "max_args": 3,
+            "description": "Get a range of elements from a list"
+        },
+        {
+            "name": "LINDEX",
+            "handler": "lindex",
+            "min_args": 2,
+            "max_args": 2,
+            "description": "Get an element from a list by its index"
+        },
+        {
+            "name": "LSET",
+            "handler": "lset",
+            "min_args": 3,
+            "max_args": 3,
+            "description": "Set the value of an element in a list by its index"
+        },
+        {
+            "name": "LPOP",
+            "handler": "lpop",
+            "min_args": 1,
+            "max_args": 1,
+            "description": "Remove and get the first element in a list"
+        },
+        {
+            "name": "RPOP",
+            "handler": "rpop",
+            "min_args": 1,
+            "max_args": 1,
+            "description": "Remove and get the last element in a list"
+        },
+        {
+            "name": "LREM",
+            "handler": "lrem",
+            "min_args": 3,
+            "max_args": 3,
+            "description": "Remove elements from a list"
+        },
+        {
+            "name": "LTRIM",
+            "handler": "ltrim",
+            "min_args": 3,
+            "max_args": 3,
+            "description": "Trim a list to the specified range"
+        },
+        {
+            "name": "BLPOP",
+            "handler": "blpop",
+            "min_args": 2,
+            "max_args": -1,
+            "description": "Remove and get the first element in a list, or block until one is available"
+        },
+        {
+            "name": "BRPOP",
+            "handler": "brpop",
+            "min_args": 2,
+            "max_args": -1,
+            "description": "Remove and get the last element in a list, or block until one is available"
         }
     ]
 }
