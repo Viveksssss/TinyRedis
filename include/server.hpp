@@ -14,6 +14,7 @@ private:
     void do_accept();
 
     boost::asio::ip::tcp::acceptor _acceptor;
+    boost::asio::io_context& io_context;
 };
 
 }

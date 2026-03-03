@@ -1,12 +1,20 @@
 #include "storage.hpp"
+#include "task.hpp"
 
+#include <boost/asio/error.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/system/detail/error_code.hpp>
 #include <chrono>
 #include <cstddef>
+#include <future>
 #include <iterator>
+// #include <mutex>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <random>
 #include <stdexcept>
+#include <string>
 #include <thread>
 
 namespace Redis {
@@ -15,11 +23,18 @@ Storage::Storage()
     : _quit(false)
 {
     start_cleaner();
+
+    _io_thread = std::thread([this]() {
+        io_context.run();
+    });
 }
 
 Storage::~Storage()
 {
     stop_cleaner();
+    io_context.stop();
+    _io_thread.join();
+    _waiter_cleaner.join();
 }
 
 Storage& Storage::instance()
@@ -51,19 +66,19 @@ void Storage::stop_cleaner()
 */
 void Storage::set_string(const std::string& key, const std::string& value)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    // std::lock_guard<std::mutex> lock(_mutex);
     _store[key] = ValueWithExpiry(value);
 }
 
 void Storage::set_string_with_expiry_ms(const std::string& key, const std::string& value, std::chrono::milliseconds ttl)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    // std::lock_guard<std::mutex> lock(_mutex);
     _store[key] = ValueWithExpiry(value, ttl);
 }
 
 std::optional<std::string> Storage::get_string(const std::string& key)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    // std::lock_guard<std::mutex> lock(_mutex);
 
     auto it = _store.find(key);
     if (it == _store.end()) {
@@ -85,7 +100,7 @@ std::optional<std::string> Storage::get_string(const std::string& key)
 
 std::optional<std::string> Storage::lindex(const std::string& key, int index)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    // std::lock_guard<std::mutex> lock(_mutex);
     auto it = _store.find(key);
     if (it == _store.end() || it->second.type != ValueType::LIST) {
         return std::nullopt;
@@ -105,7 +120,7 @@ std::optional<std::string> Storage::lindex(const std::string& key, int index)
 
 size_t Storage::lrem(const std::string& key, int count, const std::string& value)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    // std::lock_guard<std::mutex> lock(_mutex);
     auto it = _store.find(key);
     if (it == _store.end() || it->second.type != ValueType::LIST) {
         return 0;
@@ -151,20 +166,27 @@ size_t Storage::lrem(const std::string& key, int count, const std::string& value
 
 size_t Storage::rpush(const std::string& key, const std::string& value)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
-    auto it = _store.find(key);
-    if (it == _store.end()) {
-        ListValue new_list = { value };
-        _store[key] = ValueWithExpiry(new_list);
-        return 1;
-    }
+    std::size_t result;
+    {
 
-    if (it->second.type != ValueType::LIST) {
-        throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+        // std::lock_guard<std::mutex> lock(_mutex);
+        auto it = _store.find(key);
+        if (it == _store.end()) {
+            ListValue new_list = { value };
+            _store[key] = ValueWithExpiry(new_list);
+            result = 1;
+        } else {
+
+            if (it->second.type != ValueType::LIST) {
+                throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+            }
+            auto* list = it->second.get_list_ptr();
+            list->push_back(value);
+            result = list->size();
+        }
     }
-    auto* list = it->second.get_list_ptr();
-    list->push_back(value);
-    return list->size();
+    notify_waiters(key);
+    return result;
 }
 
 size_t Storage::rpush_multi(const std::string& key, const std::vector<std::string>& values)
@@ -174,45 +196,54 @@ size_t Storage::rpush_multi(const std::string& key, const std::vector<std::strin
         return len.value_or(0);
     }
 
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::size_t result;
+    {
+        // std::lock_guard<std::mutex> lock(_mutex);
+        auto it = _store.find(key);
+        if (it == _store.end()) {
+            // 列表不存在，创建新列表
+            _store[key] = ValueWithExpiry(values);
+            result = 1;
+        } else {
 
-    auto it = _store.find(key);
-    if (it == _store.end()) {
-        // 列表不存在，创建新列表
-        _store[key] = ValueWithExpiry(values);
-        return values.size();
+            // 检查类型
+            if (it->second.type != ValueType::LIST) {
+                throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+            }
+
+            // 头部插入元素
+            auto* list = it->second.get_list_ptr();
+            list->insert(list->end(), values.begin(), values.end());
+
+            result = list->size();
+        }
     }
-
-    // 检查类型
-    if (it->second.type != ValueType::LIST) {
-        throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
-    }
-
-    // 头部插入元素
-    auto* list = it->second.get_list_ptr();
-    list->insert(list->end(), values.begin(), values.end());
-
-    return list->size();
+    notify_waiters(key);
+    return result;
 }
 
 size_t Storage::lpush(const std::string& key, const std::string& value)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::size_t result;
 
-    auto it = _store.find(key);
-    if (it == _store.end()) {
-        ListValue new_list = { value };
-        _store[key] = new_list;
-        return 1;
+    {
+        // std::lock_guard<std::mutex> lock(_mutex);
+        auto it = _store.find(key);
+        if (it == _store.end()) {
+            ListValue new_list = { value };
+            _store[key] = new_list;
+            result = 1;
+        } else {
+            if (it->second.type != ValueType::LIST) {
+                throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+            }
+            auto* list = it->second.get_list_ptr();
+            list->insert(list->begin(), value);
+            result = list->size();
+        }
     }
-
-    if (it->second.type != ValueType::LIST) {
-        throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
-    }
-
-    auto* list = it->second.get_list_ptr();
-    list->insert(list->begin(), value);
-    return list->size();
+    notify_waiters(key);
+    return result;
 }
 
 size_t Storage::lpush_multi(const std::string& key, const std::vector<std::string>& values)
@@ -222,26 +253,29 @@ size_t Storage::lpush_multi(const std::string& key, const std::vector<std::strin
         return len.value_or(0);
     }
 
-    std::lock_guard<std::mutex> lock(_mutex);
-
-    auto it = _store.find(key);
-    if (it == _store.end()) {
-        _store[key] = ValueWithExpiry(values);
-        return 1;
+    std::size_t result;
+    {
+        // std::lock_guard<std::mutex> lock(_mutex);
+        auto it = _store.find(key);
+        if (it == _store.end()) {
+            _store[key] = ValueWithExpiry(values);
+            result = 1;
+        } else {
+            if (it->second.type != ValueType::LIST) {
+                throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+            }
+            auto* list = it->second.get_list_ptr();
+            list->insert(list->begin(), values.begin(), values.end());
+            result = list->size();
+        }
     }
-
-    if (it->second.type != ValueType::LIST) {
-        throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
-    }
-
-    auto* list = it->second.get_list_ptr();
-    list->insert(list->begin(), values.begin(), values.end());
-    return list->size();
+    notify_waiters(key);
+    return result;
 }
 
 std::optional<ListValue> Storage::get_list(const std::string& key)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    // std::lock_guard<std::mutex> lock(_mutex);
 
     auto it = _store.find(key);
     if (it == _store.end()) {
@@ -253,7 +287,7 @@ std::optional<ListValue> Storage::get_list(const std::string& key)
 
 std::optional<ListValue> Storage::lrange(const std::string& key, int start, int stop)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    // std::lock_guard<std::mutex> lock(_mutex);
     auto it = _store.find(key);
     if (it == _store.end()) {
         return std::nullopt;
@@ -290,7 +324,7 @@ std::optional<ListValue> Storage::lrange(const std::string& key, int start, int 
 
 bool Storage::lset(const std::string& key, int index, const std::string& value)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    // std::lock_guard<std::mutex> lock(_mutex);
 
     auto it = _store.find(key);
     if (it == _store.end() || it->second.type != ValueType::LIST) {
@@ -316,7 +350,7 @@ bool Storage::lset(const std::string& key, int index, const std::string& value)
 
 std::optional<size_t> Storage::llen(const std::string& key)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    // std::lock_guard<std::mutex> lock(_mutex);
 
     auto it = _store.find(key);
     if (it == _store.end() || it->second.type != ValueType::LIST) {
@@ -331,7 +365,7 @@ std::optional<size_t> Storage::llen(const std::string& key)
 
 bool Storage::is_list(const std::string& key)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    // std::lock_guard<std::mutex> lock(_mutex);
 
     auto it = _store.find(key);
     if (it == _store.end()) {
@@ -343,7 +377,7 @@ bool Storage::is_list(const std::string& key)
 
 std::optional<std::string> Storage::lpop(const std::string& key)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    // std::lock_guard<std::mutex> lock(_mutex);
     auto it = _store.find(key);
     if (it == _store.end() || it->second.type != ValueType::LIST) {
         return std::nullopt;
@@ -364,7 +398,7 @@ std::optional<std::string> Storage::lpop(const std::string& key)
 
 std::optional<std::string> Storage::rpop(const std::string& key)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    // std::lock_guard<std::mutex> lock(_mutex);
     auto it = _store.find(key);
     if (it == _store.end() || it->second.type != ValueType::LIST) {
         return std::nullopt;
@@ -383,21 +417,165 @@ std::optional<std::string> Storage::rpop(const std::string& key)
     return value;
 }
 
-std::optional<std::string> Storage::blpop(const std::string& key, std::chrono::seconds timeout)
+Task<std::optional<std::string>> Storage::co_blpop(const std::string& key, std::chrono::seconds timeout)
 {
-    // 暂时不实现
-    return std::nullopt;
+    auto value = try_lpop(key);
+    if (value) {
+        co_return value;
+    }
+
+    auto promise = std::make_shared<std::promise<std::optional<std::string>>>();
+    auto future = promise->get_future().share();
+
+    auto client = std::make_shared<WaitingClient>(io_context);
+    client->key = key;
+    client->promise = promise;
+    client->is_left = true;
+    {
+        std::lock_guard<std::mutex> lock(_waiter_mutex);
+        _waiters[key].left_waiters.push_back(client);
+    }
+
+    if (timeout != std::chrono::seconds::zero()) {
+        client->timer.expires_after(timeout);
+        client->timer.async_wait([this, client, key, promise](const boost::system::error_code& ec) {
+            /* 主动取消 */
+
+            if (ec == boost::asio::error::operation_aborted) {
+                return;
+            }
+
+            /* 正常超时 */
+
+            bool removed = false;
+            {
+                std::lock_guard<std::mutex> lock(_waiter_mutex);
+                auto& waiters = _waiters[key].left_waiters;
+
+                // 从等待队列中移除
+                auto it = std::find_if(waiters.begin(), waiters.end(),
+                    [client](const auto& c) { return c == client; });
+
+                if (it != waiters.end()) {
+                    waiters.erase(it);
+                    removed = true;
+                }
+            }
+
+            if (removed) {
+                // 设置超时结果
+                promise->set_value(std::nullopt);
+            }
+        });
+    }
+
+    AwaitableFuture<std::optional<std::string>> awaitable { future };
+    auto result = co_await awaitable;
+    co_return result;
 }
 
-std::optional<std::string> Storage::brpop(const std::string& key, std::chrono::seconds timeout)
+Task<std::optional<std::string>> Storage::co_brpop(const std::string& key, std::chrono::seconds timeout)
 {
-    // 暂时不实现
-    return std::nullopt;
+    auto value = try_rpop(key);
+    if (value) {
+        co_return value;
+    }
+
+    auto promise = std::make_shared<std::promise<std::optional<std::string>>>();
+    auto future = promise->get_future();
+
+    auto client = std::make_shared<WaitingClient>(io_context);
+    client->key = key;
+    client->promise = promise;
+    client->is_left = false;
+    {
+        std::lock_guard<std::mutex> lock(_waiter_mutex);
+        _waiters[key].right_waiters.push_back(client);
+    }
+
+    if (timeout != std::chrono::seconds::zero()) {
+        client->timer.expires_after(timeout);
+        client->timer.async_wait([this, client, key, promise](const boost::system::error_code& ec) {
+            /* 正常超时 */
+            if (!ec) {
+                bool removed = false;
+                {
+                    std::lock_guard<std::mutex> lock(_waiter_mutex);
+                    auto& waiters = _waiters[key].right_waiters;
+
+                    // 从等待队列中移除
+                    auto it = std::find_if(waiters.begin(), waiters.end(),
+                        [client](const auto& c) { return c == client; });
+
+                    if (it != waiters.end()) {
+                        waiters.erase(it);
+                        removed = true;
+                    }
+                }
+
+                if (removed) {
+                    // 设置超时结果
+                    promise->set_value(std::nullopt);
+                }
+            }
+        });
+    }
+
+    AwaitableFuture<std::optional<std::string>> awaitable { std::move(future) };
+    auto result = co_await awaitable;
+    co_return result;
+}
+
+std::optional<std::string> Storage::try_lpop(const std::string& key)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _store.find(key);
+    if (it == _store.end() || it->second.type != ValueType::LIST) {
+        // _store[key] = ValueWithExpiry { ListValue {} };
+        return std::nullopt;
+    }
+
+    auto* list = it->second.get_list_ptr();
+    if (!list || list->empty()) {
+        return std::nullopt;
+    }
+
+    std::string value = list->front();
+    list->erase(list->begin());
+
+    if (list->empty()) {
+        _store.erase(key);
+    }
+    return value;
+}
+std::optional<std::string> Storage::try_rpop(const std::string& key)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end() || it->second.type != ValueType::LIST) {
+        // _store[key] = ValueWithExpiry { ListValue {} };
+        return std::nullopt;
+    }
+
+    auto* list = it->second.get_list_ptr();
+    if (!list || list->empty()) {
+        return std::nullopt;
+    }
+
+    std::string value = list->back();
+    list->pop_back();
+
+    if (list->empty()) {
+        _store.erase(key);
+    }
+
+    return value;
 }
 
 bool Storage::ltrim(const std::string& key, int start, int stop)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    // std::lock_guard<std::mutex> lock(_mutex);
 
     auto it = _store.find(key);
     if (it == _store.end() || it->second.type != ValueType::LIST) {
@@ -443,6 +621,95 @@ bool Storage::ltrim(const std::string& key, int start, int stop)
 }
 
 /**
+    阻塞支持****************************************************
+*/
+
+void Storage::notify_waiters(const std::string& key)
+{
+    // std::lock_guard<std::mutex> lock(_waiter_mutex);
+    auto it = _waiters.find(key);
+    if (it == _waiters.end() || (it->second.left_waiters.empty() && it->second.right_waiters.empty())) {
+        return;
+    }
+
+    auto& waiters = it->second;
+    if (!waiters.left_waiters.empty()) {
+        auto client = waiters.left_waiters.front();
+        waiters.left_waiters.pop_front();
+
+        client->timer.cancel();
+
+        auto value = try_lpop(key);
+        if (auto p = client->promise.lock()) {
+            p->set_value(value);
+        }
+
+    } else if (!waiters.right_waiters.empty()) {
+        auto client = waiters.right_waiters.front();
+        waiters.right_waiters.pop_front();
+
+        client->timer.cancel();
+
+        auto value = try_rpop(key);
+        if (auto p = client->promise.lock()) {
+            p->set_value(value);
+        }
+    }
+}
+
+void Storage::check_expired_waiters()
+{
+    auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(_mutex);
+    for (auto it = _waiters.begin(); it != _waiters.end();) {
+        bool has_any = false;
+
+        auto& left = it->second.left_waiters;
+        for (auto w_it = left.begin(); w_it != left.end();) {
+            if (now >= ((*w_it)->wakeup_time)) {
+                /* 过期 */
+                if (auto p = (*w_it)->promise.lock()) {
+                    p->set_value(std::nullopt);
+                }
+                w_it = left.erase(w_it);
+            } else {
+                ++w_it;
+                has_any = true;
+            }
+        }
+
+        auto& right = it->second.right_waiters;
+        for (auto w_it = right.begin(); w_it != right.end();) {
+            if (now >= ((*w_it)->wakeup_time)) {
+                if (auto p = (*w_it)->promise.lock()) {
+                    p->set_value(std::nullopt);
+                }
+                w_it = right.erase(w_it);
+            } else {
+                ++w_it;
+                has_any = true;
+            }
+        }
+        if (!has_any) {
+            it = _waiters.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void Storage::start_waiter_cleaner()
+{
+    _waiter_cleaner_running = true;
+    _waiter_cleaner = std::thread([this]() {
+        while (_waiter_cleaner_running) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            check_expired_waiters();
+        }
+    });
+}
+
+/**
     通用操作****************************************************
 */
 void Storage::check_expiry(const std::string& key)
@@ -455,7 +722,7 @@ void Storage::check_expiry(const std::string& key)
 
 bool Storage::del(const std::string& key)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    // std::lock_guard<std::mutex> lock(_mutex);
     return _store.erase(key) > 0;
 }
 
@@ -473,7 +740,7 @@ std::size_t Storage::del(const std::vector<std::string>& keys)
 
 bool Storage::exists(const std::string& key)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    // std::lock_guard<std::mutex> lock(_mutex);
 
     auto it = _store.find(key);
     if (it == _store.end()) {
@@ -514,7 +781,7 @@ void Storage::clean_expired_random()
         int checked = 0;
 
         {
-            std::lock_guard<std::mutex> lock(_mutex);
+            // std::lock_guard<std::mutex> lock(_mutex);
             if (_store.empty()) {
                 return;
             }

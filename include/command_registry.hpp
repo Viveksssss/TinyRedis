@@ -1,5 +1,8 @@
 #pragma once
 
+#include "task.hpp"
+
+#include <boost/asio/io_context.hpp>
 #include <functional>
 #include <string>
 #include <unordered_map>
@@ -14,6 +17,7 @@
 namespace Redis::Config {
 
 using CommandHandler = std::function<std::string(const std::vector<std::string>&)>;
+using CommandHandler_co = std::function<Task<std::string>(const std::vector<std::string>&)>;
 
 struct CommandInfo {
     std::string name;

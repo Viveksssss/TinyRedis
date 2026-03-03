@@ -1,7 +1,10 @@
 #include "session.hpp"
+#include "command_handlers.hpp"
 #include "command_registry.hpp"
 #include "resp_parse.hpp"
 
+#include <boost/asio/io_context.hpp>
+#include <cctype>
 #include <cstddef>
 #include <iostream>
 #include <string>
@@ -11,8 +14,9 @@
 
 namespace Redis {
 
-Session::Session(boost::asio::ip::tcp::socket socket)
+Session::Session(boost::asio::io_context& context, boost::asio::ip::tcp::socket socket)
     : _socket(std::move(socket))
+    , io_context(context)
 {
 }
 
@@ -40,7 +44,7 @@ void Session::do_read()
                 if (value->is_array()) {
                     auto cmd_array = value->as_string_array();
                     if (cmd_array.has_value()) {
-                        process_command(*cmd_array);
+                        process_command_co(*cmd_array);
                     } else {
                         do_write(RESPEncoder::encode_error("invalid command format"));
                     }
@@ -80,19 +84,29 @@ void Session::do_write(const std::string& response)
     boost::asio::async_write(_socket, boost::asio::buffer(response), handler);
 }
 
-void Session::process_command(const std::vector<std::string>& command)
+Task<std::monostate> Session::process_command_co(const std::vector<std::string>& command)
 {
     if (command.empty()) {
         do_write(RESPEncoder::encode_error("empty command"));
-        return;
+        co_return std::monostate {};
     }
 
     std::string cmd = command[0];
-
-    auto& registry = Config::CommandRegistry::instance();
-    std::string response = registry.execute(cmd, command);
+    for (auto& c : cmd) {
+        c = std::toupper(c);
+    }
+    std::string response;
+    if (cmd == "BLPOP") {
+        response = co_await Config::CommandHandlers::blpop(command);
+    } else if (cmd == "BRPOP") {
+        response = co_await Config::CommandHandlers::brpop(command);
+    } else {
+        auto& registry = Config::CommandRegistry::instance();
+        response = registry.execute(cmd, command);
+    }
 
     do_write(response);
+    co_return std::monostate {};
 }
 void Session::handle_error(const boost::system::error_code& ec, const std::string& operation)
 {
