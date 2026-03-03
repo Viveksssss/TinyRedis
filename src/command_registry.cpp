@@ -2,6 +2,7 @@
 
 #include "resp_parse.hpp"
 #include <algorithm>
+#include <boost/asio/io_context.hpp>
 #include <cctype>
 #include <fstream>
 #include <iostream>

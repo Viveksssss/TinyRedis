@@ -1,6 +1,14 @@
 #pragma once
 
+#include "task.hpp"
+
+#include <boost/asio.hpp>
+#include <boost/asio/io_context.hpp>
 #include <chrono>
+#include <condition_variable>
+#include <future>
+#include <list>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -9,6 +17,8 @@
 #include <unordered_map>
 #include <variant>
 
+#include <iostream>
+
 namespace Redis {
 
 enum class ValueType {
@@ -16,9 +26,25 @@ enum class ValueType {
     LIST
 };
 
+/* 列表类型 */
 using ListValue = std::vector<std::string>;
+/* 值的变体 */
 using ValueVariant = std::variant<std::string, ListValue>;
+/* 等待的客户端信息 */
+struct WaitingClient {
+    std::string key;
+    boost::asio::steady_timer timer; // 添加 ASIO 定时器
+    std::chrono::steady_clock::time_point wakeup_time;
+    std::weak_ptr<std::promise<std::optional<std::string>>> promise;
+    /* true = BLPOP, false = BRPOP */
+    bool is_left;
 
+    WaitingClient(boost::asio::io_context& io_context)
+        : timer(io_context)
+    {
+    }
+};
+/* 值 */
 struct ValueWithExpiry {
     /* 值类型 */
     ValueType type;
@@ -136,10 +162,12 @@ public:
     std::optional<std::string> lpop(const std::string& key);
     /* 从列表尾部弹出元素 */
     std::optional<std::string> rpop(const std::string& key);
-    /* 移除并返回列表的第一个元素，如果没有元素则阻塞 */
-    std::optional<std::string> blpop(const std::string& key, std::chrono::seconds timeout);
-    /* 移除并返回列表的最后一个元素，如果没有元素则阻塞 */
-    std::optional<std::string> brpop(const std::string& key, std::chrono::seconds timeout);
+    /* 移除并返回列表的第一个/最后一个元素，如果没有元素则阻塞 */
+    Task<std::optional<std::string>> co_blpop(const std::string& key, std::chrono::seconds timeout);
+    Task<std::optional<std::string>> co_brpop(const std::string& key, std::chrono::seconds timeout);
+    // 尝试弹出（不阻塞，用于先检查）
+    std::optional<std::string> try_lpop(const std::string& key);
+    std::optional<std::string> try_rpop(const std::string& key);
     /* 修剪列表，只保留指定范围内的元素 */
     bool ltrim(const std::string& key, int start, int stop);
 
@@ -157,19 +185,46 @@ public:
 
 private:
     Storage();
+
+    /**
+        清理线程****************************************************
+    */
     /* 检查并移除过期的键 */
     void check_expiry(const std::string& key);
     /* 启动清理线程 */
     void start_cleaner();
     /* 关闭清理线程 */
     void stop_cleaner();
-    std::unordered_map<std::string, ValueWithExpiry> _store;
-    std::mutex _mutex;
-
     /* 清理线程 */
     std::thread _cleaner;
     /* 清理线程退出标志 */
     std::atomic<bool> _quit;
+
+    /**
+        阻塞支持****************************************************
+    */
+    /* 唤醒等待者 */
+    void notify_waiters(const std::string& key);
+    /* 检查超时的等待者 */
+    void check_expired_waiters();
+    /* 启动等待者清理线程 */
+    void start_waiter_cleaner();
+
+    struct KeyWaiters {
+        std::list<std::shared_ptr<WaitingClient>> left_waiters;
+        std::list<std::shared_ptr<WaitingClient>> right_waiters;
+    };
+
+    std::unordered_map<std::string, KeyWaiters> _waiters;
+    std::condition_variable _waiter_cv;
+    std::thread _waiter_cleaner;
+    std::thread _io_thread;
+    std::atomic<bool> _waiter_cleaner_running;
+    std::mutex _waiter_mutex;
+
+    std::unordered_map<std::string, ValueWithExpiry> _store;
+    std::mutex _mutex;
+    boost::asio::io_context io_context;
 };
 
 }

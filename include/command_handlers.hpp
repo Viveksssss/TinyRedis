@@ -1,5 +1,7 @@
 #pragma once
 
+#include "task.hpp"
+
 #include <string>
 #include <vector>
 
@@ -28,8 +30,8 @@ public:
     static std::string rpop(const std::vector<std::string>& args);
     static std::string lrem(const std::vector<std::string>& args);
     static std::string ltrim(const std::vector<std::string>& args);
-    static std::string blpop(const std::vector<std::string>& args);
-    static std::string brpop(const std::vector<std::string>& args);
+    static Task<std::string> blpop(const std::vector<std::string>& args);
+    static Task<std::string> brpop(const std::vector<std::string>& args);
 };
 
 }

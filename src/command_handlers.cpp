@@ -33,8 +33,6 @@ void CommandHandlers::register_all()
     registry.register_handler("rpop", rpop);
     registry.register_handler("lrem", lrem);
     registry.register_handler("ltrim", ltrim);
-    registry.register_handler("blpop", blpop);
-    registry.register_handler("brpop", brpop);
 }
 
 std::string CommandHandlers::ping(const std::vector<std::string>& args)
@@ -378,14 +376,87 @@ std::string CommandHandlers::ltrim(const std::vector<std::string>& args)
     storage.ltrim(key, start, stop);
     return RESPEncoder::encode_simple_string("OK");
 }
-/* 暂时不予实现 */
-std::string CommandHandlers::blpop(const std::vector<std::string>& args)
+
+Task<std::string> CommandHandlers::blpop(const std::vector<std::string>& args)
 {
-    return RESPEncoder::encode_null_bulk_string();
+    if (args.size() < 3) {
+        co_return RESPEncoder::encode_error("wrong number of arguments for 'blpop' command");
+    }
+
+    /* 解析秒数 */
+    int timeout_seconds;
+    try {
+        size_t pos;
+        timeout_seconds = std::stoi(args.back(), &pos);
+        if (pos != args.back().length()) {
+            co_return RESPEncoder::encode_error("timeout is not an integer");
+        }
+    } catch (...) {
+        co_return RESPEncoder::encode_error("timeout is not an integer");
+    }
+
+    auto timeout = std::chrono::seconds(timeout_seconds);
+    auto& storage = Storage::instance();
+
+    /* 1.检查所有key,看是否有立即可用的元素 */
+    for (std::size_t i = 1; i < args.size() - 1; ++i) {
+        const auto& key = args[i];
+
+        auto value = storage.try_lpop(key);
+        if (value) {
+            std::vector<std::string> result = { key, *value };
+            co_return RESPEncoder::encode_array(result);
+        }
+    }
+
+    const auto& key = args[1];
+    auto value = co_await storage.co_blpop(key, timeout);
+    if (value.has_value()) {
+        co_return RESPEncoder::encode_array({ key, value.value() });
+    } else {
+        co_return RESPEncoder::encode_null_bulk_string();
+    }
 }
-std::string CommandHandlers::brpop(const std::vector<std::string>& args)
+
+Task<std::string> CommandHandlers::brpop(const std::vector<std::string>& args)
 {
-    return RESPEncoder::encode_null_bulk_string();
+    if (args.size() < 3) {
+        co_return RESPEncoder::encode_error("wrong number of arguments for 'brpop' command");
+    }
+
+    /* 解析秒数 */
+    int timeout_seconds;
+    try {
+        size_t pos;
+        timeout_seconds = std::stoi(args.back(), &pos);
+        if (pos != args.back().length()) {
+            co_return RESPEncoder::encode_error("timeout is not an integer");
+        }
+    } catch (...) {
+        co_return RESPEncoder::encode_error("timeout is not an integer");
+    }
+
+    auto timeout = std::chrono::seconds(timeout_seconds);
+    auto& storage = Storage::instance();
+
+    /* 1.检查所有key,看是否有立即可用的元素 */
+    for (std::size_t i = 1; i < args.size() - 1; ++i) {
+        const auto& key = args[i];
+
+        auto value = storage.try_lpop(key);
+        if (value) {
+            std::vector<std::string> result = { key, *value };
+            co_return RESPEncoder::encode_array(result);
+        }
+    }
+
+    const auto& key = args[1];
+    auto value = co_await storage.co_blpop(key, timeout);
+    if (value.has_value()) {
+        co_return RESPEncoder::encode_array({ key, value.value() });
+    } else {
+        co_return RESPEncoder::encode_null_bulk_string();
+    }
 }
 
 }
