@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "stream_utils.hpp"
 #include "task.hpp"
 
 #include <boost/asio/error.hpp>
@@ -342,7 +343,7 @@ bool Storage::lset(const std::string& key, int index, const std::string& value)
         index = size + index;
     if (index < 0 || index >= size) {
         // return false;
-        throw std::runtime_error("ERR index out of range");
+        throw std::runtime_error("index out of range");
     }
     (*list)[index] = value;
     return true;
@@ -620,6 +621,139 @@ bool Storage::ltrim(const std::string& key, int start, int stop)
     return true;
 }
 
+std::string Storage::xadd(const std::string& key, const std::string& id, const std::vector<std::pair<std::string, std::string>>& fields)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _store.find(key);
+    std::optional<std::string> last_id;
+    if (it != _store.end()) {
+        if (it->second.type != ValueType::STREAM) {
+            throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+        }
+        auto* stream = it->second.get_stream_ptr();
+        if (!stream->empty()) {
+            last_id = stream->back().id;
+        }
+    }
+
+    std::string final_id;
+    try {
+        /* 如果是*或-*就生成，如果本身ok就直接检查后返回 */
+        final_id = Utils::StreamUtils::make_id_from_spec(id, last_id);
+    } catch (const std::runtime_error& e) {
+        throw;
+    }
+
+    if (it == _store.end()) {
+        Stream new_stream;
+        StreamEntry entry(final_id);
+        entry.fields = fields;
+        new_stream.push_back(entry);
+        _store[key] = ValueWithExpiry(new_stream);
+    } else {
+        auto* stream = it->second.get_stream_ptr();
+        StreamEntry entry(final_id);
+        entry.fields = fields;
+        stream->push_back(entry);
+    }
+    return final_id;
+}
+std::optional<std::vector<StreamEntry>> Storage::xrange(const std::string& key, const std::string& start, const std::string& end)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _store.find(key);
+    if (it == _store.end() || it->second.type != ValueType::STREAM) {
+        return std::nullopt;
+    }
+    auto* stream = it->second.get_stream_ptr();
+    if (stream->empty()) {
+        return std::vector<StreamEntry>();
+    }
+    uint64_t start_ms, end_ms, start_seq, end_seq;
+
+    if (!Utils::StreamUtils::parse_range_id(start, start_ms, start_seq, true)) {
+        throw std::runtime_error("Invalid start ID");
+    }
+    if (!Utils::StreamUtils::parse_range_id(end, end_ms, end_seq, false)) {
+        throw std::runtime_error("Invalid end ID");
+    }
+
+    std::vector<StreamEntry> result;
+    for (const auto& entry : *stream) {
+        uint64_t ms, seq;
+        if (!Utils::StreamUtils::parse_range_id(entry.id, ms, seq, true)) {
+            continue;
+        }
+        if (Utils::StreamUtils::is_id_in_range(ms, seq, start_ms, start_seq, end_ms, end_seq)) {
+            result.push_back(entry);
+        }
+    }
+    return result;
+}
+
+bool Storage::is_stream(const std::string& key)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        return false;
+    }
+
+    if (it->second.is_expired()) {
+        _store.erase(it);
+        return false;
+    }
+
+    return it->second.type == ValueType::STREAM;
+}
+
+std::unordered_map<std::string, std::vector<StreamEntry>> Storage::xread(const std::vector<std::pair<std::string, std::string>>& stream_requets)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    std::unordered_map<std::string, std::vector<StreamEntry>> result;
+
+    for (const auto& request : stream_requets) {
+        const std::string& key = request.first;
+        const std::string& id = request.second;
+        auto it = _store.find(key);
+        if (it == _store.end()) {
+            continue;
+        }
+
+        if (it->second.type != ValueType::STREAM) {
+            throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+        }
+
+        auto* stream = it->second.get_stream_ptr();
+        if (stream->empty()) {
+            /* 空流跳过 */
+            continue;
+        }
+
+        uint64_t req_ms, req_seq;
+        if (!Utils::StreamUtils::parse_id(id, req_ms, req_seq)) {
+            throw std::runtime_error("ERR Invalid stream ID format");
+        }
+
+        std::vector<StreamEntry> entries;
+        for (const auto& entry : *stream) {
+            uint64_t ms, seq;
+            if (!Utils::StreamUtils::parse_id(entry.id, ms, seq)) {
+                continue;
+            }
+            /* 只返回ID大于请求ID的条目 */
+            if (ms > req_ms || (ms == req_ms && seq > req_seq)) {
+                entries.push_back(entry);
+            }
+        }
+        if (!entries.empty()) {
+            result[key] = std::move(entries);
+        }
+    }
+    return result;
+}
+
 /**
     阻塞支持****************************************************
 */
@@ -753,6 +887,24 @@ bool Storage::exists(const std::string& key)
     }
 
     return true;
+}
+
+std::optional<ValueType> Storage::type(const std::string& key)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        return std::nullopt;
+    }
+
+    // 检查是否过期
+    if (it->second.is_expired()) {
+        _store.erase(it);
+        return std::nullopt;
+    }
+
+    return it->second.type;
 }
 
 void Storage::clean_expired_random()

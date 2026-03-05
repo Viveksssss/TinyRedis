@@ -32,6 +32,14 @@ public:
     static std::string ltrim(const std::vector<std::string>& args);
     static Task<std::string> blpop(const std::vector<std::string>& args);
     static Task<std::string> brpop(const std::vector<std::string>& args);
+
+    // Stream流
+    static std::string xadd(const std::vector<std::string>& args);
+    static std::string xrange(const std::vector<std::string>& args);
+    static std::string xread(const std::vector<std::string>& args); 
+
+    // 杂项
+    static std::string type(const std::vector<std::string>& args);
 };
 
 }

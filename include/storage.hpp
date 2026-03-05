@@ -17,19 +17,29 @@
 #include <unordered_map>
 #include <variant>
 
-#include <iostream>
-
 namespace Redis {
 
 enum class ValueType {
     STRING,
-    LIST
+    LIST,
+    STREAM
+};
+
+struct StreamEntry {
+    std::string id;
+    std::vector<std::pair<std::string, std::string>> fields;
+    StreamEntry(const std::string& entry_id)
+        : id(entry_id)
+    {
+    }
 };
 
 /* 列表类型 */
 using ListValue = std::vector<std::string>;
+/* Stream类型 */
+using Stream = std::vector<StreamEntry>;
 /* 值的变体 */
-using ValueVariant = std::variant<std::string, ListValue>;
+using ValueVariant = std::variant<std::string, ListValue, Stream>;
 /* 等待的客户端信息 */
 struct WaitingClient {
     std::string key;
@@ -87,6 +97,22 @@ struct ValueWithExpiry {
     {
     }
 
+    // Stream 构造函数
+    ValueWithExpiry(const Stream& v)
+        : value(v)
+        , type(ValueType::STREAM)
+        , has_expiry(false)
+    {
+    }
+
+    ValueWithExpiry(const Stream& v, std::chrono::milliseconds ttl)
+        : value(v)
+        , type(ValueType::STREAM)
+        , expiry(std::chrono::steady_clock::now() + ttl)
+        , has_expiry(true)
+    {
+    }
+
     bool is_expired() const
     {
         if (!has_expiry)
@@ -116,6 +142,20 @@ struct ValueWithExpiry {
             return nullptr;
         }
         return &std::get<ListValue>(value);
+    }
+    /* 获取流 */
+    std::optional<Stream> get_stream() const
+    {
+        if (type != ValueType::STREAM)
+            return std::nullopt;
+        return std::get<Stream>(value);
+    }
+
+    Stream* get_stream_ptr()
+    {
+        if (type != ValueType::STREAM)
+            return nullptr;
+        return &std::get<Stream>(value);
     }
 };
 
@@ -172,6 +212,15 @@ public:
     bool ltrim(const std::string& key, int start, int stop);
 
     /**
+        Stream操作****************************************************
+    */
+
+    std::string xadd(const std::string& key, const std::string& id, const std::vector<std::pair<std::string, std::string>>& fields);
+    std::optional<std::vector<StreamEntry>> xrange(const std::string& key, const std::string& start, const std::string& end);
+    bool is_stream(const std::string& key);
+    std::unordered_map<std::string, std::vector<StreamEntry>> xread(const std::vector<std::pair<std::string, std::string>>& stream_requets);
+
+    /**
         通用操作****************************************************
     */
     /* 删除键 */
@@ -180,8 +229,8 @@ public:
     std::size_t del(const std::vector<std::string>& keys);
     /* 检查键是否存在 */
     bool exists(const std::string& key);
-    /* 随机抽样清除过期键 */
-    void clean_expired_random();
+    /* 获取键所对应的类型 */
+    std::optional<ValueType> type(const std::string& key);
 
 private:
     Storage();
@@ -195,6 +244,8 @@ private:
     void start_cleaner();
     /* 关闭清理线程 */
     void stop_cleaner();
+    /* 随机抽样清除过期键 */
+    void clean_expired_random();
     /* 清理线程 */
     std::thread _cleaner;
     /* 清理线程退出标志 */
