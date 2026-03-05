@@ -2,6 +2,7 @@
 #include "command_registry.hpp"
 #include "resp_parse.hpp"
 #include "storage.hpp"
+#include "stream_utils.hpp"
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -33,6 +34,14 @@ void CommandHandlers::register_all()
     registry.register_handler("rpop", rpop);
     registry.register_handler("lrem", lrem);
     registry.register_handler("ltrim", ltrim);
+    registry.register_handler("ltrim", ltrim);
+    registry.register_handler("ltrim", ltrim);
+
+    registry.register_handler("xadd", xadd);
+    registry.register_handler("xrange", xrange);
+    registry.register_handler("xread", xread);
+
+    registry.register_handler("type", type);
 }
 
 std::string CommandHandlers::ping(const std::vector<std::string>& args)
@@ -456,6 +465,179 @@ Task<std::string> CommandHandlers::brpop(const std::vector<std::string>& args)
         co_return RESPEncoder::encode_array({ key, value.value() });
     } else {
         co_return RESPEncoder::encode_null_bulk_string();
+    }
+}
+
+std::string CommandHandlers::xadd(const std::vector<std::string>& args)
+{
+    if (args.size() < 4 || (args.size() - 3) % 2 != 0) {
+        return RESPEncoder::encode_error("wrong number of arguments for 'xadd' command");
+    }
+    const std::string& key = args[1];
+    const std::string& id = args[2];
+
+    if (!Redis::Utils::StreamUtils::is_auto_spec(id) && !Redis::Utils::StreamUtils::is_valid_id(id)) {
+        return RESPEncoder::encode_error("Invalid stream ID format");
+    }
+
+    std::vector<std::pair<std::string, std::string>> fields;
+
+    for (std::size_t i = 3; i < args.size(); i += 2) {
+        fields.emplace_back(args[i], args[i + 1]);
+    }
+    auto& storage = Storage::instance();
+
+    try {
+        std::string entry_id = storage.xadd(key, id, fields);
+        return RESPEncoder::encode_bulk_string(entry_id);
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::xrange(const std::vector<std::string>& args)
+{
+    if (args.size() != 4) {
+        return RESPEncoder::encode_error("wrong number of arguments for 'xrange' command");
+    }
+
+    const std::string& key = args[1];
+    const std::string& start = args[2];
+    const std::string& end = args[3];
+    auto& storage = Storage::instance();
+
+    /*
+        这里处理RESP编码的时候，不要把已经处理成RESP的字符串再次传入编码函数导致双重编码。
+        对于多层嵌套，可以手动处理。
+    */
+    try {
+        auto entries_opt = storage.xrange(key, start, end);
+        if (!entries_opt) {
+            return RESPEncoder::encode_array({});
+        }
+
+        const auto& entries = *entries_opt;
+
+        std::string result;
+        result.reserve(256);
+        result = "*" + std::to_string(entries.size()) + "\r\n";
+        for (const auto& entry : entries) {
+            /* 首先是两个元素的数组，id和fields_array */
+            result += "*2\r\n";
+
+            /* id */
+            result += "$" + std::to_string(entry.id.length()) + "\r\n";
+            result += entry.id + "\r\n";
+
+            /* 键值对数组 */
+            result += "*" + std::to_string(entry.fields.size() * 2) + "\r\n";
+            std::string fields_content;
+            for (const auto& field : entry.fields) {
+                fields_content += "$" + std::to_string(field.first.length()) + "\r\n";
+                fields_content += field.first + "\r\n";
+
+                fields_content += "$" + std::to_string(field.second.length()) + "\r\n";
+                fields_content += field.second + "\r\n";
+            }
+
+            result += fields_content;
+        }
+        return result;
+
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::xread(const std::vector<std::string>& args)
+{
+    if (args.size() < 4 || args[1] != "STREAMS") {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'xread' command");
+    }
+
+    if ((args.size() - 2) % 2 != 0) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'xread' command");
+    }
+
+    std::vector<std::pair<std::string, std::string>> stream_requests;
+    for (size_t i = 2; i < args.size(); i += 2) {
+        if (i + 1 >= args.size()) {
+            return RESPEncoder::encode_error("ERR wrong number of arguments for 'xread' command");
+        }
+        stream_requests.emplace_back(args[i], args[i + 1]);
+    }
+
+    auto& storage = Storage::instance();
+
+    try {
+        auto result = storage.xread(stream_requests);
+
+        if (result.empty()) {
+            return "*0\r\n";
+        }
+
+        std::string response = "*" + std::to_string(result.size()) + "\r\n";
+
+        for (const auto& [key, entries] : result) {
+            response += "*2\r\n";
+
+            response += "$" + std::to_string(key.size()) + "\r\n";
+            response += key + "\r\n";
+
+            response += "*" + std::to_string(entries.size()) + "\r\n";
+
+            for (const auto& entry : entries) {
+                response += "*2\r\n";
+
+                // id
+                response += "$" + std::to_string(entry.id.size()) + "\r\n";
+                response += entry.id + "\r\n";
+
+                // fields_array
+                response += "*" + std::to_string(entry.fields.size() * 2) + "\r\n";
+                for (const auto& field : entry.fields) {
+                    response += "$" + std::to_string(field.first.size()) + "\r\n";
+                    response += field.first + "\r\n";
+
+                    response += "$" + std::to_string(field.second.size()) + "\r\n";
+                    response += field.second + "\r\n";
+                }
+            }
+        }
+
+        return response;
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::type(const std::vector<std::string>& args)
+{
+    if (args.size() != 2) {
+        return RESPEncoder::encode_error("wrong number of arguments for 'type' command");
+    }
+
+    const auto& key = args[1];
+    auto& storage = Storage::instance();
+
+    if (!storage.exists(key)) {
+        return RESPEncoder::encode_simple_string("none");
+    }
+
+    auto type = storage.type(key);
+    if (!type) {
+        return RESPEncoder::encode_simple_string("none");
+    }
+
+    switch (*type) {
+    case ValueType::STRING:
+        return RESPEncoder::encode_simple_string("string");
+    case ValueType::LIST:
+        return RESPEncoder::encode_simple_string("list");
+    case ValueType::STREAM:
+        return RESPEncoder::encode_simple_string("stream");
+    default:
+        return RESPEncoder::encode_simple_string("unknown");
     }
 }
 

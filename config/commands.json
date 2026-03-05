@@ -118,6 +118,34 @@
             "min_args": 2,
             "max_args": -1,
             "description": "Remove and get the last element in a list, or block until one is available"
+        },
+        {
+            "name":"TYPE",
+            "handler":"type",
+            "min_args" : 1,
+            "max_args":1,
+            "description":"Returns the type of value stored at key"
+        },
+        {
+            "name": "XADD",
+            "handler": "xadd",
+            "min_args": 3,
+            "max_args": -1,
+            "description": "Appends a new entry to a stream"
+        },
+        {
+            "name": "XRANGE",
+            "handler": "xrange",
+            "min_args": 3,
+            "max_args": 3,
+            "description": "Returns a range of entries from a stream"
+        },
+        {
+            "name": "XREAD",
+            "handler": "xread",
+            "min_args": 3,
+            "max_args": -1,
+            "description": "Read data from one or more streams"
         }
     ]
 }
