@@ -3,6 +3,7 @@
 #include "resp_parse.hpp"
 #include "storage.hpp"
 #include "stream_utils.hpp"
+#include "task.hpp"
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -36,6 +37,8 @@ void CommandHandlers::register_all()
     registry.register_handler("ltrim", ltrim);
     registry.register_handler("ltrim", ltrim);
     registry.register_handler("ltrim", ltrim);
+    registry.register_handler("brpop", brpop);
+    registry.register_handler("blpop", blpop);
 
     registry.register_handler("xadd", xadd);
     registry.register_handler("xrange", xrange);
@@ -549,65 +552,145 @@ std::string CommandHandlers::xrange(const std::vector<std::string>& args)
     }
 }
 
-std::string CommandHandlers::xread(const std::vector<std::string>& args)
+// command_handlers.cpp
+Task<std::string> CommandHandlers::xread(const std::vector<std::string>& args)
 {
-    if (args.size() < 4 || args[1] != "STREAMS") {
-        return RESPEncoder::encode_error("ERR wrong number of arguments for 'xread' command");
+    // XREAD STREAMS key1 key2 ... id1 id2 ...
+    if (args.size() < 4) {
+        co_return RESPEncoder::encode_error("wrong number of arguments for 'xread' command");
     }
 
-    if ((args.size() - 2) % 2 != 0) {
-        return RESPEncoder::encode_error("ERR wrong number of arguments for 'xread' command");
-    }
+    std::chrono::milliseconds timeout { 0 };
+    std::size_t count = 0;
+    std::size_t streams_start = 1;
 
-    std::vector<std::pair<std::string, std::string>> stream_requests;
-    for (size_t i = 2; i < args.size(); i += 2) {
-        if (i + 1 >= args.size()) {
-            return RESPEncoder::encode_error("ERR wrong number of arguments for 'xread' command");
+    std::size_t i = 1;
+    while (i < args.size()) {
+        if (args[i] == "BLOCK" || args[i] == "block") {
+            if (i + 1 >= args.size()) {
+                co_return RESPEncoder::encode_error("wrong number of arguments for 'xread' command");
+            }
+            try {
+                uint64_t block_ms = std::stoull(args[i + 1]);
+                timeout = std::chrono::milliseconds(block_ms);
+                i += 2;
+            } catch (...) {
+                co_return RESPEncoder::encode_error("invalid BLOCK argument");
+            }
+        } else if (args[i] == "COUNT" || args[i] == "count") {
+            if (i + 1 >= args.size()) {
+                co_return RESPEncoder::encode_error("wrong number of arguments for 'xread' command");
+            }
+            try {
+                count = std::stoull(args[i + 1]);
+                i += 2;
+            } catch (...) {
+                co_return RESPEncoder::encode_error("invalid COUNT argument");
+            }
+        } else if (args[i] == "STREAMS" || args[i] == "streams") {
+            streams_start = i;
+            break;
+        } else {
+            co_return RESPEncoder::encode_error("unknown option for 'xread' command");
         }
-        stream_requests.emplace_back(args[i], args[i + 1]);
+    }
+
+    if (streams_start >= args.size()) {
+        co_return RESPEncoder::encode_error("expected STREAMS keyword");
+    }
+
+    std::size_t streams_index = streams_start + 1;
+    std::size_t total_args = args.size() - streams_index;
+
+    if (total_args % 2 != 0) {
+        co_return RESPEncoder::encode_error("wrong number of arguments for 'xread' command");
+    }
+
+    size_t num_streams = total_args / 2;
+
+    // 分离 keys 和 ids
+    std::vector<std::string> keys;
+    std::vector<std::string> ids;
+
+    for (size_t i = 0; i < num_streams; ++i) {
+        keys.push_back(args[streams_index + i]); // 前半部分是 keys
+    }
+
+    for (size_t i = 0; i < num_streams; ++i) {
+        ids.push_back(args[num_streams + streams_index + i]); // 后半部分是 ids
+    }
+
+    // 构建流请求对
+    std::vector<std::pair<std::string, std::string>> stream_requests;
+    for (size_t i = 0; i < num_streams; ++i) {
+        stream_requests.emplace_back(keys[i], ids[i]);
     }
 
     auto& storage = Storage::instance();
 
     try {
-        auto result = storage.xread(stream_requests);
+        std::unordered_map<std::string, std::vector<StreamEntry>> results;
 
-        if (result.empty()) {
-            return "*0\r\n";
+        if (timeout.count() > 0) {
+            auto results_opt = co_await storage.xread_block(stream_requests, timeout, count);
+            results = results_opt;
+        } else {
+            results = storage.xread(stream_requests, count);
         }
 
-        std::string response = "*" + std::to_string(result.size()) + "\r\n";
+        if (results.empty()) {
+            co_return "*0\r\n";
+        }
 
-        for (const auto& [key, entries] : result) {
+        // 构建 RESP 响应（保持原始 key 顺序）
+        std::string response = "*" + std::to_string(num_streams) + "\r\n";
+
+        for (size_t i = 0; i < num_streams; ++i) {
+            const auto& key = keys[i];
+
+            // 每个流是一个包含两个元素的数组：[key, entries_array]
             response += "*2\r\n";
 
+            // key 作为 bulk string
             response += "$" + std::to_string(key.size()) + "\r\n";
             response += key + "\r\n";
 
-            response += "*" + std::to_string(entries.size()) + "\r\n";
+            // 查找这个 key 的条目
+            auto it = results.find(key);
+            if (it == results.end() || it->second.empty()) {
+                // 没有新条目，返回空数组
+                response += "*0\r\n";
+            } else {
+                // 有条目，返回条目数组
+                const auto& entries = it->second;
+                response += "*" + std::to_string(entries.size()) + "\r\n";
 
-            for (const auto& entry : entries) {
-                response += "*2\r\n";
+                for (const auto& entry : entries) {
+                    // 每个条目是 [id, fields_array]
+                    response += "*2\r\n";
 
-                // id
-                response += "$" + std::to_string(entry.id.size()) + "\r\n";
-                response += entry.id + "\r\n";
+                    // id
+                    response += "$" + std::to_string(entry.id.size()) + "\r\n";
+                    response += entry.id + "\r\n";
 
-                // fields_array
-                response += "*" + std::to_string(entry.fields.size() * 2) + "\r\n";
-                for (const auto& field : entry.fields) {
-                    response += "$" + std::to_string(field.first.size()) + "\r\n";
-                    response += field.first + "\r\n";
-
-                    response += "$" + std::to_string(field.second.size()) + "\r\n";
-                    response += field.second + "\r\n";
+                    // fields_array
+                    response += "*" + std::to_string(entry.fields.size() * 2) + "\r\n";
+                    for (const auto& field : entry.fields) {
+                        // field name
+                        response += "$" + std::to_string(field.first.size()) + "\r\n";
+                        response += field.first + "\r\n";
+                        // field value
+                        response += "$" + std::to_string(field.second.size()) + "\r\n";
+                        response += field.second + "\r\n";
+                    }
                 }
             }
         }
 
-        return response;
+        co_return response;
+
     } catch (const std::runtime_error& e) {
-        return RESPEncoder::encode_error(e.what());
+        co_return RESPEncoder::encode_error(e.what());
     }
 }
 

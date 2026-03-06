@@ -96,12 +96,10 @@ Task<std::monostate> Session::process_command_co(const std::vector<std::string>&
         c = std::toupper(c);
     }
     std::string response;
-    if (cmd == "BLPOP") {
-        response = co_await Config::CommandHandlers::blpop(command);
-    } else if (cmd == "BRPOP") {
-        response = co_await Config::CommandHandlers::brpop(command);
+    auto& registry = Config::CommandRegistry::instance();
+    if (registry.is_async(cmd)) {
+        response = co_await registry.execute_async(cmd, command);
     } else {
-        auto& registry = Config::CommandRegistry::instance();
         response = registry.execute(cmd, command);
     }
 

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <boost/asio/io_context.hpp>
 #include <cctype>
+#include <exception>
 #include <fstream>
 #include <iostream>
 
@@ -49,6 +50,13 @@ void CommandRegistry::register_handler(const std::string& name, CommandHandler h
     std::string upper_name = name;
     std::transform(upper_name.begin(), upper_name.end(), upper_name.begin(), ::toupper);
     _handlers[upper_name] = handler;
+}
+
+void CommandRegistry::register_handler(const std::string& name, CommandHandler_async handler)
+{
+    std::string upper_name = name;
+    std::transform(upper_name.begin(), upper_name.end(), upper_name.begin(), ::toupper);
+    _async_handlers[upper_name] = handler;
 }
 
 bool CommandRegistry::validate_args(const CommandInfo& info, const std::vector<std::string>& args, std::string& error) const
@@ -99,6 +107,22 @@ std::string CommandRegistry::execute(const std::string& cmd_name, const std::vec
     }
 }
 
+Task<std::string> CommandRegistry::execute_async(const std::string& name, const std::vector<std::string>& args)
+{
+    std::string upper_name = name;
+    std::transform(upper_name.begin(), upper_name.end(), upper_name.begin(), ::toupper);
+
+    auto it = _async_handlers.find(upper_name);
+    if (it == _async_handlers.end()) {
+        co_return RESPEncoder::encode_error("unknown command '" + name + "'");
+    }
+    try {
+        co_return co_await it->second(args);
+    } catch (const std::exception& e) {
+        co_return RESPEncoder::encode_error(std::string(e.what()));
+    }
+}
+
 bool CommandRegistry::has_command(const std::string& cmd_name) const
 {
     std::string upper_name = cmd_name;
@@ -112,6 +136,13 @@ const CommandInfo* CommandRegistry::get_command_info(const std::string& cmd_name
     std::transform(upper_name.begin(), upper_name.end(), upper_name.begin(), ::toupper);
     auto it = _commands.find(upper_name);
     return it != _commands.end() ? &it->second : nullptr;
+}
+
+bool CommandRegistry::is_async(const std::string& cmd_name) const
+{
+    std::string upper_name = cmd_name;
+    std::transform(upper_name.begin(), upper_name.end(), upper_name.begin(), ::toupper);
+    return _async_handlers.find(upper_name) != _async_handlers.end();
 }
 
 }

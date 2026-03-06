@@ -17,7 +17,7 @@
 namespace Redis::Config {
 
 using CommandHandler = std::function<std::string(const std::vector<std::string>&)>;
-using CommandHandler_co = std::function<Task<std::string>(const std::vector<std::string>&)>;
+using CommandHandler_async = std::function<Task<std::string>(const std::vector<std::string>&)>;
 
 struct CommandInfo {
     std::string name;
@@ -25,6 +25,7 @@ struct CommandInfo {
     int min_args;
     int max_args; // -1 表示可变参数
     std::string description;
+    bool is_async { false };
 };
 
 class CommandRegistry {
@@ -37,14 +38,21 @@ public:
     // 注册命令处理器
     void register_handler(const std::string& name, CommandHandler handler);
 
+    void register_handler(const std::string& name, CommandHandler_async handler);
+
     // 执行命令
     std::string execute(const std::string& cmd_name, const std::vector<std::string>& args);
+
+    // 执行异步命令
+    Task<std::string> execute_async(const std::string& name, const std::vector<std::string>& args);
 
     // 检查命令是否存在
     bool has_command(const std::string& cmd_name) const;
 
     // 获取命令信息
     const CommandInfo* get_command_info(const std::string& cmd_name) const;
+
+    bool is_async(const std::string&cmd_name)const;
 
 private:
     CommandRegistry() = default;
@@ -53,6 +61,7 @@ private:
 
     std::unordered_map<std::string, CommandInfo> _commands;
     std::unordered_map<std::string, CommandHandler> _handlers;
+    std::unordered_map<std::string, CommandHandler_async> _async_handlers;
 };
 
 }

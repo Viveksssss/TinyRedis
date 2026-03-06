@@ -4,6 +4,7 @@
 
 #include <boost/asio.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <chrono>
 #include <condition_variable>
 #include <future>
@@ -54,6 +55,21 @@ struct WaitingClient {
     {
     }
 };
+/* XREAD等待结构 */
+struct XReadWaiter {
+    std::string key;
+    std::string id;
+    std::size_t count { 0 };
+    std::shared_ptr<std::promise<std::optional<std::vector<StreamEntry>>>> promise;
+    boost::asio::steady_timer timer;
+    std::chrono::steady_clock::time_point wakeup_time;
+
+    XReadWaiter(boost::asio::io_context& io_content)
+        : timer(io_content)
+    {
+    }
+};
+
 /* 值 */
 struct ValueWithExpiry {
     /* 值类型 */
@@ -218,7 +234,8 @@ public:
     std::string xadd(const std::string& key, const std::string& id, const std::vector<std::pair<std::string, std::string>>& fields);
     std::optional<std::vector<StreamEntry>> xrange(const std::string& key, const std::string& start, const std::string& end);
     bool is_stream(const std::string& key);
-    std::unordered_map<std::string, std::vector<StreamEntry>> xread(const std::vector<std::pair<std::string, std::string>>& stream_requets);
+    std::unordered_map<std::string, std::vector<StreamEntry>> xread(const std::vector<std::pair<std::string, std::string>>& stream_requets, std::size_t count);
+    Task<std::unordered_map<std::string, std::vector<StreamEntry>>> xread_block(const std::vector<std::pair<std::string, std::string>>& stream_requets, std::chrono::milliseconds timeout, std::size_t count);
 
     /**
         通用操作****************************************************
@@ -256,6 +273,7 @@ private:
     */
     /* 唤醒等待者 */
     void notify_waiters(const std::string& key);
+    void notify_xread_waiters(const std::string& key, const StreamEntry& new_entry);
     /* 检查超时的等待者 */
     void check_expired_waiters();
     /* 启动等待者清理线程 */
@@ -272,6 +290,9 @@ private:
     std::thread _io_thread;
     std::atomic<bool> _waiter_cleaner_running;
     std::mutex _waiter_mutex;
+
+    std::unordered_map<std::string, std::list<std::shared_ptr<XReadWaiter>>> _xread_waiters;
+    std::mutex _xread_waiter_mutex;
 
     std::unordered_map<std::string, ValueWithExpiry> _store;
     std::mutex _mutex;

@@ -644,18 +644,18 @@ std::string Storage::xadd(const std::string& key, const std::string& id, const s
         throw;
     }
 
+    StreamEntry new_entry(final_id);
+    new_entry.fields = fields; // 直接赋值整个 vector
+
     if (it == _store.end()) {
         Stream new_stream;
-        StreamEntry entry(final_id);
-        entry.fields = fields;
-        new_stream.push_back(entry);
+        new_stream.push_back(new_entry);
         _store[key] = ValueWithExpiry(new_stream);
     } else {
         auto* stream = it->second.get_stream_ptr();
-        StreamEntry entry(final_id);
-        entry.fields = fields;
-        stream->push_back(entry);
+        stream->push_back(new_entry);
     }
+    notify_xread_waiters(key, new_entry);
     return final_id;
 }
 std::optional<std::vector<StreamEntry>> Storage::xrange(const std::string& key, const std::string& start, const std::string& end)
@@ -708,7 +708,7 @@ bool Storage::is_stream(const std::string& key)
     return it->second.type == ValueType::STREAM;
 }
 
-std::unordered_map<std::string, std::vector<StreamEntry>> Storage::xread(const std::vector<std::pair<std::string, std::string>>& stream_requets)
+std::unordered_map<std::string, std::vector<StreamEntry>> Storage::xread(const std::vector<std::pair<std::string, std::string>>& stream_requets, std::size_t count)
 {
     std::lock_guard<std::mutex> lock(_mutex);
     std::unordered_map<std::string, std::vector<StreamEntry>> result;
@@ -745,6 +745,10 @@ std::unordered_map<std::string, std::vector<StreamEntry>> Storage::xread(const s
             /* 只返回ID大于请求ID的条目 */
             if (ms > req_ms || (ms == req_ms && seq > req_seq)) {
                 entries.push_back(entry);
+
+                if (count > 0 && entries.size() >= count) {
+                    break;
+                }
             }
         }
         if (!entries.empty()) {
@@ -754,13 +758,79 @@ std::unordered_map<std::string, std::vector<StreamEntry>> Storage::xread(const s
     return result;
 }
 
+Task<std::unordered_map<std::string, std::vector<StreamEntry>>> Storage::xread_block(const std::vector<std::pair<std::string, std::string>>& stream_requests, std::chrono::milliseconds timeout, std::size_t count)
+{
+    auto immediate_result = xread(stream_requests, count);
+
+    if (!immediate_result.empty()) {
+        co_return immediate_result;
+    }
+
+    if (timeout == std::chrono::milliseconds::zero()) {
+        timeout = std::chrono::milliseconds::max();
+    }
+
+    auto promise = std::make_shared<std::promise<std::optional<std::vector<StreamEntry>>>>();
+    auto future = promise->get_future();
+
+    const auto& first_request = stream_requests[0];
+    const std::string& key = first_request.first;
+    const std::string& id = first_request.second;
+
+    auto waiter = std::make_shared<XReadWaiter>(io_context);
+    waiter->key = key;
+    waiter->id = id;
+    waiter->promise = promise;
+    waiter->count = count;
+    waiter->wakeup_time = std::chrono::steady_clock::now() + timeout;
+
+    {
+        std::lock_guard<std::mutex> lock(_xread_waiter_mutex);
+        _xread_waiters[key].push_back(waiter);
+    }
+
+    if (timeout != std::chrono::milliseconds::max()) {
+        waiter->timer.expires_after(timeout);
+        waiter->timer.async_wait([this, waiter, key](const boost::system::error_code& ec) {
+            if (!ec) {
+                bool removed = false;
+                {
+                    std::lock_guard<std::mutex> lock(_xread_waiter_mutex);
+                    auto& waiters = _xread_waiters[key];
+                    auto it = std::find_if(waiters.begin(), waiters.end(),
+                        [waiter](const auto& w) { return w == waiter; });
+
+                    if (it != waiters.end()) {
+                        waiters.erase(it);
+                        removed = true;
+                    }
+                }
+
+                if (removed) {
+                    waiter->promise->set_value(std::nullopt);
+                }
+            }
+        });
+    }
+
+    auto result_opt = co_await AwaitableFuture<std::optional<std::vector<StreamEntry>>>(std::move(future));
+
+    if (!result_opt) {
+        co_return std::unordered_map<std::string, std::vector<StreamEntry>> {};
+    }
+
+    std::unordered_map<std::string, std::vector<StreamEntry>> result;
+    result[key] = *result_opt;
+    co_return result;
+}
+
 /**
     阻塞支持****************************************************
 */
 
 void Storage::notify_waiters(const std::string& key)
 {
-    // std::lock_guard<std::mutex> lock(_waiter_mutex);
+    std::lock_guard<std::mutex> lock(_waiter_mutex);
     auto it = _waiters.find(key);
     if (it == _waiters.end() || (it->second.left_waiters.empty() && it->second.right_waiters.empty())) {
         return;
@@ -788,6 +858,94 @@ void Storage::notify_waiters(const std::string& key)
         if (auto p = client->promise.lock()) {
             p->set_value(value);
         }
+    }
+}
+
+void Storage::notify_xread_waiters(const std::string& key, const StreamEntry& new_entry)
+{
+    std::lock_guard<std::mutex> lock(_xread_waiter_mutex);
+
+    auto it = _xread_waiters.find(key);
+    if (it == _xread_waiters.end() || it->second.empty()) {
+        return;
+    }
+
+    auto it_stream = _store.find(key);
+    bool stream_valid = (it_stream != _store.end() && it_stream->second.type == ValueType::STREAM);
+
+    auto& waiters = it->second;
+
+    if (!stream_valid) {
+        for (const auto& waiter : waiters) {
+            waiter->timer.cancel();
+            waiter->promise->set_value(std::nullopt);
+        }
+        _xread_waiters.erase(it);
+        return;
+    }
+
+    auto* stream = it_stream->second.get_stream_ptr();
+    std::vector<std::shared_ptr<XReadWaiter>> to_notify;
+    to_notify.reserve(waiters.size());
+
+    /* 记录当前加入的entry */
+    uint64_t new_ms, new_seq;
+    Utils::StreamUtils::parse_id(new_entry.id, new_ms, new_seq);
+
+    auto waiter_it = waiters.begin();
+    while (waiter_it != waiters.end()) {
+        auto waiter = *waiter_it;
+
+        uint64_t req_ms, req_seq;
+        Utils::StreamUtils::parse_id(waiter->id, req_ms, req_seq);
+
+        if (new_ms > req_ms || (new_ms == req_ms && new_seq > req_seq)) {
+            to_notify.push_back(waiter);
+            waiter_it = waiters.erase(waiter_it);
+            waiter->timer.cancel();
+        } else {
+            ++waiter_it;
+        }
+    }
+
+    if (to_notify.empty()) {
+        return;
+    }
+
+    std::sort(to_notify.begin(), to_notify.end(), [](const auto& a, const auto& b) {
+        /* 按照id排序 */
+        return a->id < b->id;
+    });
+
+    // 为每个等待者准备结果
+    std::unordered_map<std::shared_ptr<XReadWaiter>, std::vector<StreamEntry>> results;
+
+    for (const auto& entry : *stream) {
+        uint64_t ms, seq;
+        Utils::StreamUtils::parse_id(entry.id, ms, seq);
+
+        for (const auto& waiter : to_notify) {
+            uint64_t req_ms, req_seq;
+            Utils::StreamUtils::parse_id(waiter->id, req_ms, req_seq);
+
+            auto& entries = results[waiter];
+
+            if (waiter->count > 0 && entries.size() >= waiter->count) {
+                continue;
+            }
+
+            if (ms > req_ms || (ms == req_ms && seq > req_seq)) {
+                entries.push_back(entry);
+            }
+        }
+    }
+
+    for (const auto& waiter : to_notify) {
+        waiter->promise->set_value(std::move(results[waiter]));
+    }
+
+    if (waiters.empty()) {
+        _xread_waiters.erase(it);
     }
 }
 
