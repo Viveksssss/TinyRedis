@@ -36,7 +36,7 @@ public:
     // Stream流
     static std::string xadd(const std::vector<std::string>& args);
     static std::string xrange(const std::vector<std::string>& args);
-    static std::string xread(const std::vector<std::string>& args); 
+    static Task<std::string> xread(const std::vector<std::string>& args);
 
     // 杂项
     static std::string type(const std::vector<std::string>& args);
