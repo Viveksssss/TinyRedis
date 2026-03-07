@@ -4,11 +4,15 @@
 #include <algorithm>
 #include <boost/asio/io_context.hpp>
 #include <cctype>
+#include <cstdint>
 #include <exception>
 #include <fstream>
 #include <iostream>
 
 namespace Redis::Config {
+
+std::unordered_map<std::string, CommandInfo>
+    Redis::Config::CommandRegistry::_commands;
 
 CommandRegistry& CommandRegistry::instance()
 {
@@ -123,7 +127,7 @@ Task<std::string> CommandRegistry::execute_async(const std::string& name, const 
     }
 }
 
-bool CommandRegistry::has_command(const std::string& cmd_name) const
+bool CommandRegistry::has_command(const std::string& cmd_name)
 {
     std::string upper_name = cmd_name;
     std::transform(upper_name.begin(), upper_name.end(), upper_name.begin(), ::toupper);
@@ -143,6 +147,25 @@ bool CommandRegistry::is_async(const std::string& cmd_name) const
     std::string upper_name = cmd_name;
     std::transform(upper_name.begin(), upper_name.end(), upper_name.begin(), ::toupper);
     return _async_handlers.find(upper_name) != _async_handlers.end();
+}
+
+std::optional<std::string> CommandRegistry::pre_check(const std::vector<std::string>& command)
+{
+    std::string key = command[0];
+    for (auto& k : key) {
+        k = std::toupper(k);
+    }
+    auto it = _commands.find(key);
+    if (it == _commands.end()) {
+        return RESPEncoder::encode_error("unknown command '" + command[0] + "' with args beginning with:");
+    }
+    auto arg_size = command.size() - 1;
+    std::size_t max_args = it->second.max_args == -1 ? UINT64_MAX : it->second.max_args;
+    std::size_t min_args = it->second.min_args;
+    if (max_args >= arg_size && min_args <= arg_size) {
+        return std::nullopt;
+    }
+    return RESPEncoder::encode_error("wrong number of arguments for '" + command[0] + "' command");
 }
 
 }

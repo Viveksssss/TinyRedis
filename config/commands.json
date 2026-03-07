@@ -146,6 +146,41 @@
             "min_args": 3,
             "max_args": -1,
             "description": "Read data from one or more streams"
+        },
+        {
+            "name": "INCR",
+            "handler": "incr",
+            "min_args": 1,
+            "max_args": 1,
+            "description": "Increment the value of a key by 1"
+        },
+        {
+            "name": "MULTI",
+            "handler": "multi",
+            "min_args": 0,
+            "max_args": 0,
+            "description": "Start a transaction"
+        },
+        {
+            "name": "EXEC",
+            "handler": "exec",
+            "min_args": 0,
+            "max_args": 0,
+            "description": "Execute a transaction"
+        },
+        {
+            "name": "WATCH",
+            "handler": "watch",
+            "min_args": 1,
+            "max_args": -1,
+            "description": "Watch a variability"
+        },
+        {          
+            "name": "DISCARD",
+            "handler": "discard",
+            "min_args": 0,
+            "max_args": 0,
+            "description": "Abort a transaction"      
         }
     ]
 }

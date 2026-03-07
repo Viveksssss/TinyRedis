@@ -44,6 +44,23 @@ Storage& Storage::instance()
     return storage;
 }
 
+std::optional<uint64_t> Storage::get_version(const std::string& key)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        return std::nullopt;
+    }
+
+    if (it->second.is_expired()) {
+        _store.erase(it);
+        return std::nullopt;
+    }
+
+    return it->second.version;
+}
+
 void Storage::start_cleaner()
 {
     _cleaner = std::thread([this]() {
@@ -67,14 +84,31 @@ void Storage::stop_cleaner()
 */
 void Storage::set_string(const std::string& key, const std::string& value)
 {
-    // std::lock_guard<std::mutex> lock(_mutex);
-    _store[key] = ValueWithExpiry(value);
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        _store[key] = ValueWithExpiry(value);
+    } else {
+        it->second.value = value;
+        it->second.version++; // 版本号递增
+    }
 }
 
 void Storage::set_string_with_expiry_ms(const std::string& key, const std::string& value, std::chrono::milliseconds ttl)
 {
     // std::lock_guard<std::mutex> lock(_mutex);
     _store[key] = ValueWithExpiry(value, ttl);
+
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        _store[key] = ValueWithExpiry(value, ttl);
+    } else {
+        it->second.has_expiry = true;
+        it->second.expiry = std::chrono::steady_clock::now() + ttl;
+        it->second.value = value;
+        it->second.version++; // 版本号递增
+    }
 }
 
 std::optional<std::string> Storage::get_string(const std::string& key)
@@ -162,6 +196,9 @@ size_t Storage::lrem(const std::string& key, int count, const std::string& value
             }
         }
     }
+    if (removed != 0) {
+        it->second.version++;
+    }
     return removed;
 }
 
@@ -176,6 +213,7 @@ size_t Storage::rpush(const std::string& key, const std::string& value)
             ListValue new_list = { value };
             _store[key] = ValueWithExpiry(new_list);
             result = 1;
+            it->second.version++;
         } else {
 
             if (it->second.type != ValueType::LIST) {
@@ -183,6 +221,7 @@ size_t Storage::rpush(const std::string& key, const std::string& value)
             }
             auto* list = it->second.get_list_ptr();
             list->push_back(value);
+            it->second.version++;
             result = list->size();
         }
     }
@@ -204,6 +243,7 @@ size_t Storage::rpush_multi(const std::string& key, const std::vector<std::strin
         if (it == _store.end()) {
             // 列表不存在，创建新列表
             _store[key] = ValueWithExpiry(values);
+            it->second.version++;
             result = 1;
         } else {
 
@@ -215,7 +255,7 @@ size_t Storage::rpush_multi(const std::string& key, const std::vector<std::strin
             // 头部插入元素
             auto* list = it->second.get_list_ptr();
             list->insert(list->end(), values.begin(), values.end());
-
+            it->second.version++;
             result = list->size();
         }
     }
@@ -234,12 +274,14 @@ size_t Storage::lpush(const std::string& key, const std::string& value)
             ListValue new_list = { value };
             _store[key] = new_list;
             result = 1;
+            it->second.version++;
         } else {
             if (it->second.type != ValueType::LIST) {
                 throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
             }
             auto* list = it->second.get_list_ptr();
             list->insert(list->begin(), value);
+            it->second.version++;
             result = list->size();
         }
     }
@@ -260,6 +302,7 @@ size_t Storage::lpush_multi(const std::string& key, const std::vector<std::strin
         auto it = _store.find(key);
         if (it == _store.end()) {
             _store[key] = ValueWithExpiry(values);
+            it->second.version++;
             result = 1;
         } else {
             if (it->second.type != ValueType::LIST) {
@@ -267,6 +310,7 @@ size_t Storage::lpush_multi(const std::string& key, const std::vector<std::strin
             }
             auto* list = it->second.get_list_ptr();
             list->insert(list->begin(), values.begin(), values.end());
+            it->second.version++;
             result = list->size();
         }
     }
@@ -346,6 +390,7 @@ bool Storage::lset(const std::string& key, int index, const std::string& value)
         throw std::runtime_error("index out of range");
     }
     (*list)[index] = value;
+    it->second.version++;
     return true;
 }
 
@@ -390,6 +435,7 @@ std::optional<std::string> Storage::lpop(const std::string& key)
 
     std::string value = list->front();
     list->erase(list->begin());
+    it->second.version++;
 
     if (list->empty()) {
         _store.erase(key);
@@ -412,6 +458,7 @@ std::optional<std::string> Storage::rpop(const std::string& key)
 
     std::string value = list->back();
     list->pop_back();
+    it->second.version++;
     if (list->empty()) {
         _store.erase(key);
     }
@@ -543,6 +590,7 @@ std::optional<std::string> Storage::try_lpop(const std::string& key)
 
     std::string value = list->front();
     list->erase(list->begin());
+    it->second.version++;
 
     if (list->empty()) {
         _store.erase(key);
@@ -566,6 +614,7 @@ std::optional<std::string> Storage::try_rpop(const std::string& key)
 
     std::string value = list->back();
     list->pop_back();
+    it->second.version++;
 
     if (list->empty()) {
         _store.erase(key);
@@ -617,6 +666,7 @@ bool Storage::ltrim(const std::string& key, int start, int stop)
     } else {
         it->second.value = new_list;
     }
+    it->second.version++;
 
     return true;
 }
@@ -655,6 +705,7 @@ std::string Storage::xadd(const std::string& key, const std::string& id, const s
         auto* stream = it->second.get_stream_ptr();
         stream->push_back(new_entry);
     }
+    it->second.version++;
     notify_xread_waiters(key, new_entry);
     return final_id;
 }
@@ -952,6 +1003,13 @@ void Storage::notify_xread_waiters(const std::string& key, const StreamEntry& ne
 void Storage::check_expired_waiters()
 {
     auto now = std::chrono::steady_clock::now();
+    check_expired_blrpop_waiters(now);
+    check_expired_xread_waiters(now);
+}
+
+void Storage::check_expired_blrpop_waiters(std::chrono::steady_clock::time_point& now)
+{
+
     std::lock_guard<std::mutex> lock(_mutex);
     for (auto it = _waiters.begin(); it != _waiters.end();) {
         bool has_any = false;
@@ -984,6 +1042,33 @@ void Storage::check_expired_waiters()
         }
         if (!has_any) {
             it = _waiters.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void Storage::check_expired_xread_waiters(std::chrono::steady_clock::time_point& now)
+{
+    std::lock_guard<std::mutex> lock(_xread_waiter_mutex);
+    for (auto it = _xread_waiters.begin(); it != _xread_waiters.end();) {
+        auto& waiters = it->second;
+        auto waiter_it = waiters.begin();
+
+        while (waiter_it != waiters.end()) {
+            auto waiter = *waiter_it;
+
+            if (now >= waiter->wakeup_time) {
+                waiter->timer.cancel();
+                waiter->promise->set_value(std::nullopt);
+                waiter_it = waiters.erase(waiter_it);
+            } else {
+                ++waiter_it;
+            }
+        }
+
+        if (waiters.empty()) {
+            it = _xread_waiters.erase(it);
         } else {
             ++it;
         }
@@ -1063,6 +1148,43 @@ std::optional<ValueType> Storage::type(const std::string& key)
     }
 
     return it->second.type;
+}
+
+std::optional<std::size_t> Storage::incr(const std::string& key)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        set_string(key, std::to_string(1));
+        return 1;
+    }
+
+    if (it->second.is_expired()) {
+        _store.erase(it);
+        set_string(key, std::to_string(1));
+        return 1;
+    }
+
+    if (it->second.type != ValueType::STRING) {
+        throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+    }
+
+    auto str_val = it->second.get_string();
+    if (!str_val) {
+        throw std::runtime_error("value is not an integer or out of range");
+    }
+    try {
+        int64_t val = std::stoll(*str_val);
+        val++; // 加1
+
+        // 存回字符串
+        it->second.value = std::to_string(val);
+        it->second.version++;
+
+        return val;
+    } catch (const std::exception& e) {
+        throw std::runtime_error("value is not an integer or out of range");
+    }
 }
 
 void Storage::clean_expired_random()

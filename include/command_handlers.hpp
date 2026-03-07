@@ -18,6 +18,11 @@ public:
     static std::string set(const std::vector<std::string>& args);
     static std::string get(const std::vector<std::string>& args);
     static std::string del(const std::vector<std::string>& args);
+    static std::string incr(const std::vector<std::string>& args);
+    static std::string multi(const std::vector<std::string>& args);
+    static std::string exec(const std::vector<std::string>& args);
+    static std::string discard(const std::vector<std::string>& args);
+    static std::string watch(const std::vector<std::string>& args);
 
     // 列表命令
     static std::string rpush(const std::vector<std::string>& args);

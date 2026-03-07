@@ -80,6 +80,8 @@ struct ValueWithExpiry {
     std::chrono::time_point<std::chrono::steady_clock> expiry;
     /* 是否有过期时间 */
     bool has_expiry;
+    /* 版本号，每次修改递增 */
+    uint64_t version { 1 };
 
     ValueWithExpiry() = default;
     /* 字符串构造 */
@@ -179,6 +181,8 @@ class Storage {
 public:
     ~Storage();
     static Storage& instance();
+    /* 获取版本号 */
+    std::optional<uint64_t> get_version(const std::string& key);
     /*
         字符串操作****************************************************
     */
@@ -248,6 +252,8 @@ public:
     bool exists(const std::string& key);
     /* 获取键所对应的类型 */
     std::optional<ValueType> type(const std::string& key);
+    /* 整形数值加1 */
+    std::optional<std::size_t> incr(const std::string& key);
 
 private:
     Storage();
@@ -274,8 +280,12 @@ private:
     /* 唤醒等待者 */
     void notify_waiters(const std::string& key);
     void notify_xread_waiters(const std::string& key, const StreamEntry& new_entry);
-    /* 检查超时的等待者 */
+    /* 清理超时等待操作 */
     void check_expired_waiters();
+    /* 检查超时的队列等待者 */
+    void check_expired_blrpop_waiters(std::chrono::steady_clock::time_point& now);
+    /* 检查超时的Stream等待者 */
+    void check_expired_xread_waiters(std::chrono::steady_clock::time_point& now);
     /* 启动等待者清理线程 */
     void start_waiter_cleaner();
 
