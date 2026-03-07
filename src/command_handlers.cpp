@@ -24,6 +24,11 @@ void CommandHandlers::register_all()
     registry.register_handler("set", set);
     registry.register_handler("get", get);
     registry.register_handler("del", del);
+    registry.register_handler("incr", incr);
+    registry.register_handler("multi", multi);
+    registry.register_handler("exec", exec);
+    registry.register_handler("watch", watch);
+    registry.register_handler("discard", discard);
 
     registry.register_handler("rpush", rpush);
     registry.register_handler("lpush", lpush);
@@ -154,6 +159,60 @@ std::string CommandHandlers::del(const std::vector<std::string>& args)
     int deleted = storage.del(std::vector<std::string>(args.begin() + 1, args.end()));
 
     return RESPEncoder::encode_integer(deleted);
+}
+
+std::string CommandHandlers::incr(const std::vector<std::string>& args)
+{
+    if (args.size() != 2) {
+        return RESPEncoder::encode_error("wrong number of arguments for 'incr' command");
+    }
+    const std::string& key = args[1];
+    auto& storage = Storage::instance();
+    try {
+        auto result = storage.incr(key);
+        if (!result) {
+            // 第一阶段：键不存在返回错误
+            return RESPEncoder::encode_error("no such key");
+        }
+        // 返回整数结果
+        return RESPEncoder::encode_integer(*result);
+
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+/* 实际这里并没有使用，multi需要在外层函数判断 */
+std::string CommandHandlers::multi(const std::vector<std::string>& args)
+{
+    if (args.size() != 1) {
+        return RESPEncoder::encode_error("wrong number of arguments for 'multi' command");
+    }
+    return RESPEncoder::encode_simple_string("OK");
+}
+
+std::string CommandHandlers::exec(const std::vector<std::string>& args)
+{
+    if (args.size() != 1) {
+        return RESPEncoder::encode_error("wrong number of arguments for 'exec' command");
+    }
+    return RESPEncoder::encode_error("EXEC without MULTI");
+}
+
+std::string CommandHandlers::discard(const std::vector<std::string>& args)
+{
+    if (args.size() != 1) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'multi' command");
+    }
+    return RESPEncoder::encode_simple_string("OK");
+}
+
+std::string CommandHandlers::watch(const std::vector<std::string>& args)
+{
+    if (args.size() != 1) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'watch' command");
+    }
+    return RESPEncoder::encode_simple_string("OK");
 }
 
 std::string CommandHandlers::rpush(const std::vector<std::string>& args)

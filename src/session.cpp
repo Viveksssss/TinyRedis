@@ -2,6 +2,7 @@
 #include "command_handlers.hpp"
 #include "command_registry.hpp"
 #include "resp_parse.hpp"
+#include "storage.hpp"
 
 #include <boost/asio/io_context.hpp>
 #include <cctype>
@@ -18,6 +19,7 @@ Session::Session(boost::asio::io_context& context, boost::asio::ip::tcp::socket 
     : _socket(std::move(socket))
     , io_context(context)
 {
+    _transaction_queue.reserve(5);
 }
 
 Session::~Session()
@@ -84,28 +86,161 @@ void Session::do_write(const std::string& response)
     boost::asio::async_write(_socket, boost::asio::buffer(response), handler);
 }
 
-Task<std::monostate> Session::process_command_co(const std::vector<std::string>& command)
+Task<void> Session::process_command_co(const std::vector<std::string>& command)
 {
     if (command.empty()) {
         do_write(RESPEncoder::encode_error("empty command"));
-        co_return std::monostate {};
+        co_return;
     }
 
     std::string cmd = command[0];
     for (auto& c : cmd) {
         c = std::toupper(c);
     }
-    std::string response;
+
+    if (auto it = Config::CommandRegistry::pre_check(command)) {
+        do_write(*it);
+        co_return;
+    }
+
+    if (cmd == "MULTI") {
+        _in_transaction = true;
+        _transaction_queue.clear();
+        do_write(RESPEncoder::encode_simple_string("OK"));
+        co_return;
+    } else if (cmd == "EXEC") {
+        if (!_in_transaction) {
+            do_write(RESPEncoder::encode_error("EXEC without MULTI"));
+            co_return;
+        }
+
+        std::string response = co_await queued_commands(_transaction_queue);
+
+        _in_transaction = false;
+        _transaction_queue.clear();
+
+        do_write(response);
+        co_return;
+    } else if (cmd == "DISCARD") {
+        if (!_in_transaction) {
+            do_write(RESPEncoder::encode_error("DISCARD without MULTI"));
+            co_return;
+        }
+
+        _in_transaction = false;
+        _transaction_queue.clear();
+        // DISCARD 也会清除 WATCH
+        _watched_keys.clear();
+        _watched_versions.clear();
+        do_write(RESPEncoder::encode_simple_string("OK"));
+        co_return;
+    } else if (cmd == "WATCH") {
+        if (command.size() < 2) {
+            do_write(RESPEncoder::encode_error("wrong number of arguments for 'watch' command"));
+            co_return;
+        }
+
+        if (_in_transaction) {
+            do_write(RESPEncoder::encode_error("WATCH inside MULTI is not allowed"));
+            co_return;
+        }
+
+        auto& storage = Storage::instance();
+
+        _watched_keys.clear();
+        _watched_versions.clear();
+
+        // 监视所有指定的键
+        for (size_t i = 1; i < command.size(); ++i) {
+            const auto& key = command[i];
+            _watched_keys.insert(key);
+
+            auto version = storage.get_version(key);
+            if (version) {
+                _watched_versions[key] = *version;
+            } else {
+                // 键不存在，版本号视为 0
+                _watched_versions[key] = 0;
+            }
+        }
+        do_write(RESPEncoder::encode_simple_string("OK"));
+        co_return;
+    }
+
+    if (_in_transaction) {
+        _transaction_queue.push_back(command);
+        do_write(RESPEncoder::encode_simple_string("QUEUED"));
+        co_return;
+    }
+
     auto& registry = Config::CommandRegistry::instance();
+    /* 结果 */
+    std::string response;
     if (registry.is_async(cmd)) {
+        /* 异步命令 */
         response = co_await registry.execute_async(cmd, command);
     } else {
+        /* 同步命令 */
         response = registry.execute(cmd, command);
     }
 
+    /* 写回 */
     do_write(response);
-    co_return std::monostate {};
+    co_return;
 }
+
+Task<std::string> Session::queued_commands(const std::vector<std::vector<std::string>>& commands)
+{
+
+    auto& storage = Storage::instance();
+
+    bool watched_keys_modified = false;
+    for (const auto& key : _watched_keys) {
+        auto current_version = storage.get_version(key);
+        auto watched_version = _watched_versions[key];
+
+        if (current_version.value_or(0) != watched_version) {
+            watched_keys_modified = true;
+            break;
+        }
+    }
+
+    if (watched_keys_modified) {
+        _in_transaction = false;
+        _transaction_queue.clear();
+        _watched_keys.clear();
+        _watched_versions.clear();
+
+        co_return "*0\r\n"; // 返回空数组表示事务失败
+    }
+
+    if (_transaction_queue.empty()) {
+        _in_transaction = false;
+        _watched_keys.clear();
+        _watched_versions.clear();
+        co_return "*0\r\n";
+    }
+
+    std::string response;
+    response.reserve(64);
+    response = "*" + std::to_string(_transaction_queue.size()) + "\r\n";
+    auto& registry = Config::CommandRegistry::instance();
+    for (const auto& queued_cmd : _transaction_queue) {
+        std::string cmd_name = queued_cmd[0];
+        for (auto& c : cmd_name) {
+            c = toupper(c);
+        }
+
+        if (registry.is_async(cmd_name)) {
+            // 事务中不应该有阻塞命令，但为了安全，我们等待结果
+            response += co_await registry.execute_async(cmd_name, queued_cmd);
+        } else {
+            response += registry.execute(cmd_name, queued_cmd);
+        }
+    }
+    co_return response;
+}
+
 void Session::handle_error(const boost::system::error_code& ec, const std::string& operation)
 {
     std::cerr << "Error during " << operation << " (thread: " << std::this_thread::get_id() << "): " << ec.message() << std::endl;

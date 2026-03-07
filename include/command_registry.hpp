@@ -47,19 +47,22 @@ public:
     Task<std::string> execute_async(const std::string& name, const std::vector<std::string>& args);
 
     // 检查命令是否存在
-    bool has_command(const std::string& cmd_name) const;
+    static bool has_command(const std::string& cmd_name);
 
     // 获取命令信息
     const CommandInfo* get_command_info(const std::string& cmd_name) const;
 
-    bool is_async(const std::string&cmd_name)const;
+    bool is_async(const std::string& cmd_name) const;
+
+    // 检查是否存在且命令参数无异常返回std::nullopt,否则返回错误信息
+    static std::optional<std::string> pre_check(const std::vector<std::string>& command);
 
 private:
     CommandRegistry() = default;
 
     bool validate_args(const CommandInfo& info, const std::vector<std::string>& args, std::string& error) const;
 
-    std::unordered_map<std::string, CommandInfo> _commands;
+    static std::unordered_map<std::string, CommandInfo> _commands;
     std::unordered_map<std::string, CommandHandler> _handlers;
     std::unordered_map<std::string, CommandHandler_async> _async_handlers;
 };
