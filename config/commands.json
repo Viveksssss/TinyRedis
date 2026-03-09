@@ -181,6 +181,27 @@
             "min_args": 0,
             "max_args": 0,
             "description": "Abort a transaction"      
+        },
+        {
+            "name": "INFO",
+            "handler": "info",
+            "min_args": 0,
+            "max_args": 1,
+            "description": "Get information and statistics about the server"
+        },
+        {
+            "name": "REPLCONF",
+            "handler": "replconf",
+            "min_args": 2,
+            "max_args": -1,
+            "description": "Configure replication"
+        },
+        {
+            "name": "PSYNC",
+            "handler": "psync",
+            "min_args": 2,
+            "max_args": 2,
+            "description": "Replication synchronization"
         }
     ]
 }

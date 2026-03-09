@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 namespace Redis {
 
@@ -24,6 +25,7 @@ Storage::Storage()
     : _quit(false)
 {
     start_cleaner();
+    start_waiter_cleaner();
 
     _io_thread = std::thread([this]() {
         io_context.run();
@@ -213,7 +215,6 @@ size_t Storage::rpush(const std::string& key, const std::string& value)
             ListValue new_list = { value };
             _store[key] = ValueWithExpiry(new_list);
             result = 1;
-            it->second.version++;
         } else {
 
             if (it->second.type != ValueType::LIST) {
@@ -243,7 +244,6 @@ size_t Storage::rpush_multi(const std::string& key, const std::vector<std::strin
         if (it == _store.end()) {
             // 列表不存在，创建新列表
             _store[key] = ValueWithExpiry(values);
-            it->second.version++;
             result = 1;
         } else {
 
@@ -274,7 +274,6 @@ size_t Storage::lpush(const std::string& key, const std::string& value)
             ListValue new_list = { value };
             _store[key] = new_list;
             result = 1;
-            it->second.version++;
         } else {
             if (it->second.type != ValueType::LIST) {
                 throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
@@ -302,7 +301,6 @@ size_t Storage::lpush_multi(const std::string& key, const std::vector<std::strin
         auto it = _store.find(key);
         if (it == _store.end()) {
             _store[key] = ValueWithExpiry(values);
-            it->second.version++;
             result = 1;
         } else {
             if (it->second.type != ValueType::LIST) {
@@ -479,6 +477,10 @@ Task<std::optional<std::string>> Storage::co_blpop(const std::string& key, std::
     client->key = key;
     client->promise = promise;
     client->is_left = true;
+    if (timeout == std::chrono::seconds::zero()) {
+        timeout = std::chrono::seconds(99999);
+    }
+    client->wakeup_time = std::chrono::steady_clock::now() + timeout;
     {
         std::lock_guard<std::mutex> lock(_waiter_mutex);
         _waiters[key].left_waiters.push_back(client);
@@ -487,32 +489,27 @@ Task<std::optional<std::string>> Storage::co_blpop(const std::string& key, std::
     if (timeout != std::chrono::seconds::zero()) {
         client->timer.expires_after(timeout);
         client->timer.async_wait([this, client, key, promise](const boost::system::error_code& ec) {
-            /* 主动取消 */
+            if (!ec) {
+                /* 正常超时 */
+                bool removed = false;
+                {
+                    std::lock_guard<std::mutex> lock(_waiter_mutex);
+                    auto& waiters = _waiters[key].left_waiters;
 
-            if (ec == boost::asio::error::operation_aborted) {
-                return;
-            }
+                    // 从等待队列中移除
+                    auto it = std::find_if(waiters.begin(), waiters.end(),
+                        [client](const auto& c) { return c == client; });
 
-            /* 正常超时 */
-
-            bool removed = false;
-            {
-                std::lock_guard<std::mutex> lock(_waiter_mutex);
-                auto& waiters = _waiters[key].left_waiters;
-
-                // 从等待队列中移除
-                auto it = std::find_if(waiters.begin(), waiters.end(),
-                    [client](const auto& c) { return c == client; });
-
-                if (it != waiters.end()) {
-                    waiters.erase(it);
-                    removed = true;
+                    if (it != waiters.end()) {
+                        waiters.erase(it);
+                        removed = true;
+                    }
                 }
-            }
 
-            if (removed) {
-                // 设置超时结果
-                promise->set_value(std::nullopt);
+                if (removed) {
+                    // 设置超时结果
+                    promise->set_value(std::nullopt);
+                }
             }
         });
     }
@@ -536,6 +533,10 @@ Task<std::optional<std::string>> Storage::co_brpop(const std::string& key, std::
     client->key = key;
     client->promise = promise;
     client->is_left = false;
+    if (timeout == std::chrono::seconds::zero()) {
+        timeout = std::chrono::seconds(99999);
+    }
+    client->wakeup_time = std::chrono::steady_clock::now() + timeout;
     {
         std::lock_guard<std::mutex> lock(_waiter_mutex);
         _waiters[key].right_waiters.push_back(client);
@@ -1080,7 +1081,7 @@ void Storage::start_waiter_cleaner()
     _waiter_cleaner_running = true;
     _waiter_cleaner = std::thread([this]() {
         while (_waiter_cleaner_running) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
             check_expired_waiters();
         }
     });
@@ -1152,8 +1153,12 @@ std::optional<ValueType> Storage::type(const std::string& key)
 
 std::optional<std::size_t> Storage::incr(const std::string& key)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
-    auto it = _store.find(key);
+    std::unordered_map<std::string, ValueWithExpiry>::iterator it;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        it = _store.find(key);
+    }
+
     if (it == _store.end()) {
         set_string(key, std::to_string(1));
         return 1;

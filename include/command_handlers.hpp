@@ -45,6 +45,9 @@ public:
 
     // 杂项
     static std::string type(const std::vector<std::string>& args);
+    static std::string info(const std::vector<std::string>& args);
+    static std::string replconf(const std::vector<std::string>& args);
+    static std::string psync(const std::vector<std::string>& args);
 };
 
 }

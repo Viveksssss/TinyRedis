@@ -19,7 +19,7 @@ endif()
 find_package(Boost REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(nlohmann_json REQUIRED)
-
+find_package(spdlog REQUIRED)
 
 add_executable(redis ${SOURCE_FILES})
 
@@ -29,3 +29,4 @@ target_include_directories(redis PUBLIC
 
 target_link_libraries(redis PRIVATE Boost::headers)
 target_link_libraries(redis PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(redis PRIVATE spdlog::spdlog)

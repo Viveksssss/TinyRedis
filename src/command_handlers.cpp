@@ -1,15 +1,26 @@
 #include "command_handlers.hpp"
 #include "command_registry.hpp"
 #include "resp_parse.hpp"
+#include "server.hpp"
 #include "storage.hpp"
 #include "stream_utils.hpp"
 #include "task.hpp"
+
 #include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+
+#include <spdlog/spdlog.h>
+
+std::shared_ptr<Redis::Server> _server = nullptr;
+
+void set_global_server(std::shared_ptr<Redis::Server> server)
+{
+    _server = server;
+}
 
 namespace Redis::Config {
 
@@ -50,6 +61,9 @@ void CommandHandlers::register_all()
     registry.register_handler("xread", xread);
 
     registry.register_handler("type", type);
+    registry.register_handler("info", info);
+    registry.register_handler("replconf", replconf);
+    registry.register_handler("psync", psync);
 }
 
 std::string CommandHandlers::ping(const std::vector<std::string>& args)
@@ -170,10 +184,6 @@ std::string CommandHandlers::incr(const std::vector<std::string>& args)
     auto& storage = Storage::instance();
     try {
         auto result = storage.incr(key);
-        if (!result) {
-            // 第一阶段：键不存在返回错误
-            return RESPEncoder::encode_error("no such key");
-        }
         // 返回整数结果
         return RESPEncoder::encode_integer(*result);
 
@@ -781,6 +791,61 @@ std::string CommandHandlers::type(const std::vector<std::string>& args)
     default:
         return RESPEncoder::encode_simple_string("unknown");
     }
+}
+
+std::string CommandHandlers::info(const std::vector<std::string>& args)
+{
+    if (args.size() > 2) {
+        return RESPEncoder::encode_error("wrong number of arguments for 'info' command");
+    }
+
+    if (!_server) {
+        return RESPEncoder::encode_error("server not initialized");
+    }
+
+    std::string section;
+    if (args.size() == 2) {
+        section = args[1];
+        // 转为小写
+        for (auto& c : section) {
+            c = tolower(c);
+        }
+    }
+
+    std::string info_str = _server->info(section);
+    return RESPEncoder::encode_bulk_string(info_str);
+}
+
+std::string CommandHandlers::replconf(const std::vector<std::string>& args)
+{
+    if (args.size() < 2) {
+        return RESPEncoder::encode_error("wrong number of arguments for 'replconf'");
+    }
+
+    // 对于这个阶段，我们忽略所有参数，直接返回 +OK
+    // 后续阶段可以在这里记录 replica 的信息
+
+    SPDLOG_INFO("Received REPLCONF :");
+    for (const auto& arg : args) {
+        SPDLOG_INFO("{}", arg);
+    }
+
+    return RESPEncoder::encode_simple_string("OK");
+}
+std::string CommandHandlers::psync(const std::vector<std::string>& args)
+{
+    if (args.size() != 3) {
+        return RESPEncoder::encode_error("wrong number of arguments for 'psync'");
+    }
+
+    const std::string& replid = args[1];
+    const std::string& offset = args[2];
+
+    if (replid == "?" && offset == "-1") {
+        std::string response = "+FULLRESYNC " + _server->replid() + " " + _server->repl_offset() + "\r\n";
+        return response; // 直接返回字符串，不是 bulk string
+    }
+    return RESPEncoder::encode_error("unsupported PSYNC parameters");
 }
 
 }
