@@ -42,5 +42,8 @@ std::shared_ptr<Redis::Server> make_server(boost::asio::io_context& io, Redis::C
         server = std::make_shared<Redis::Server>(io, config.bind, config.port);
     }
     set_global_server(server);
+    if (config.is_replication) {
+        server->start_replication();
+    }
     return server;
 }

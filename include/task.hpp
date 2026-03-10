@@ -204,7 +204,7 @@ struct AwaitableFuture {
     std::shared_future<T> future;
 
     /* 判断是否需要等待，如需等待->await_suspend */
-    bool await_ready() const { return false; }
+    bool await_ready() const { return future.wait_for(std::chrono::seconds(0)) == std::future_status::ready; }
 
     /* await_suspend启动任务，之后协程就会暂停，等待调用resume唤醒 */
     void await_suspend(std::coroutine_handle<> handle)

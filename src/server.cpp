@@ -19,7 +19,6 @@
 
 #include "command_handlers.hpp"
 #include "command_registry.hpp"
-#include "resp_parse.hpp"
 #include "session.hpp"
 
 namespace Redis {
@@ -46,9 +45,6 @@ Server::Server(boost::asio::io_context& io_context, const std::string& address, 
     , _acceptor(io_context)
     , _host(address)
     , _port(port)
-    , _master_socket(io_context)
-    , _replication_timer(io_context)
-    , _handshake_step(ReplicationStep::None)
 {
 
     auto addr = boost::asio::ip::make_address(address);
@@ -76,8 +72,57 @@ Server::Server(boost::asio::io_context& io_context, const std::string& address, 
     _master_port = master_port;
     _role = "replication";
     _is_replication = true;
+}
 
-    start_replication();
+void Server::register_wait(std::shared_ptr<WaitContext> ctx)
+{
+    std::lock_guard<std::mutex> lock(_wait_mutex);
+    _waiting_waits.push_back(ctx);
+
+    check_wait_conditions();
+}
+
+void Server::check_wait_conditions()
+{
+    auto now = std::chrono::steady_clock::now();
+    auto it = _waiting_waits.begin();
+    while (it != _waiting_waits.end()) {
+        if (auto ctx = it->lock()) {
+            SPDLOG_INFO("Checking wait: target_offset={}, required={}, current_acks={}, deadline={}",
+                ctx->target_offset, ctx->required_replicas,
+                count_replicas_with_offset_ge(ctx->target_offset),
+                std::chrono::duration_cast<std::chrono::milliseconds>(ctx->deadline - now).count());
+            // 检查是否超时
+            if (now >= ctx->deadline) {
+                // 超时，返回当前确认数量
+                size_t acked = count_replicas_with_offset_ge(ctx->target_offset);
+                if (!ctx->completed) {
+                    ctx->completed = true;
+                    if (auto sp = ctx->promise.lock()) {
+                        sp->set_value(acked);
+                    }
+                }
+                it = _waiting_waits.erase(it);
+                continue;
+            }
+
+            // 检查是否已有足够 replica 确认
+            size_t acked = count_replicas_with_offset_ge(ctx->target_offset);
+            if (acked >= ctx->required_replicas && !ctx->completed) {
+                ctx->completed = true;
+                if (auto sp = ctx->promise.lock()) {
+                    sp->set_value(acked);
+                }
+                it = _waiting_waits.erase(it);
+                continue;
+            }
+
+            ++it;
+        } else {
+            // 清理失效的等待
+            it = _waiting_waits.erase(it);
+        }
+    }
 }
 
 void Server::decrement_client()
@@ -125,7 +170,8 @@ void Server::send_rdb_file(std::shared_ptr<Session> session)
     size_t rdb_length = rdb_content.length();
 
     // 格式: $<length>\r\n<binary_contents>
-    std::string rdb_response = "$" + std::to_string(rdb_length) + "\r\n" + rdb_content;
+    // RESP Bulk String requires trailing \r\n after the payload.
+    std::string rdb_response = "$" + std::to_string(rdb_length) + "\r\n" + rdb_content + "\r\n";
 
     SPDLOG_INFO("Sending empty RDB file, length: {} bytes", rdb_length);
 
@@ -154,6 +200,7 @@ void Server::remove_replica(std::shared_ptr<Session> replica_session)
         SPDLOG_INFO("Replica removed, remaining replicas: {}", _replicas.size());
     }
 }
+
 // 传播命令到所有 replica
 void Server::propagate_command(const std::vector<std::string>& command, const std::string& resp_command)
 {
@@ -185,269 +232,70 @@ bool Server::is_write_command(const std::string& cmd) const
     return write_commands.find(upper_cmd) != write_commands.end();
 }
 
-std::string Server::step_name() const
+size_t Server::count_replicas_with_offset_ge(uint64_t offset) const
 {
-    switch (_handshake_step) {
-    case ReplicationStep::None:
-        return "None";
-    case ReplicationStep::Ping:
-        return "PING";
-    case ReplicationStep::ReplconfPort:
-        return "REPLCONF listening-port";
-    case ReplicationStep::ReplconfCapa:
-        return "REPLCONF capa";
-    case ReplicationStep::Psync:
-        return "PSYNC";
-    case ReplicationStep::Complete:
-        return "Complete";
-    default:
-        return "Unknown";
+    size_t count = 0;
+    for (const auto& [_, replica_offset] : _replica_offsets) {
+        if (replica_offset >= offset) {
+            count++;
+        }
     }
+    return count;
+}
+void Server::send_getack_to_all()
+{
+    std::lock_guard<std::mutex> lock(_replicas_mutex);
+    std::string getack_cmd = "*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n";
+
+    for (const auto& weak_replica : _replicas) {
+        if (auto sp = weak_replica.lock()) {
+            // sp->do_write_raw(getack_cmd);
+            sp->send_to_replica(getack_cmd);
+        } else {
+            // 清理失效的 replica
+            _replicas.erase(std::remove_if(_replicas.begin(), _replicas.end(), [&weak_replica](const std::weak_ptr<Redis::Session>& elem) {
+                return elem.lock() == weak_replica.lock();
+            }),
+                _replicas.end());
+        }
+    }
+}
+
+void Server::update_replica_offset(const std::string& replica_id, uint64_t offset)
+{
+    std::lock_guard<std::mutex> lock(_replica_offsets_mutex);
+    _replica_offsets[replica_id] = offset;
+
+    check_wait_conditions();
+}
+
+std::size_t Server::replica_count()
+{
+    std::lock_guard<std::mutex> lock(_replicas_mutex);
+    std::size_t count = 0;
+    auto it = _replicas.begin();
+    while (it != _replicas.end()) {
+        if (auto sp = it->lock() && it->expired()) {
+            it = _replicas.erase(it);
+        } else {
+            ++it;
+            count++;
+        }
+    }
+
+    return count;
 }
 
 void Server::start_replication()
 {
-    SPDLOG_INFO("Starting replication handshake...");
-    // 延迟一下再连接，确保服务器已经启动
-    // _replication_timer.expires_after(std::chrono::milliseconds(1000));
-    // _replication_timer.async_wait([this](boost::system::error_code ec) {
-    //     if (!ec) {
-    //         connect_to_master();
-    //     }
-    // });
-
-    boost::asio::post(_io_context, [this]() {
-        // 但这里也不能直接用 shared_from_this，因为 post 的回调可能
-        // 在构造函数还没返回时就执行（如果 io_context 已经在运行）
-
-        // 更安全：再用一次定时器，延迟 0 秒
-        _replication_timer.expires_after(std::chrono::milliseconds(1000));
-        _replication_timer.async_wait([this](boost::system::error_code ec) {
-            if (!ec) {
-                connect_to_master();
-            }
-        });
-    });
-}
-
-void Server::connect_to_master()
-{
-    SPDLOG_INFO("Connecting to master {}:{}", _master_host, _master_port);
-
-    tcp::resolver resolver(_io_context);
-    auto endpoints = resolver.resolve(_master_host, std::to_string(_master_port));
-
+    SPDLOG_INFO("Starting replication (replica connects to master)...");
     auto self = shared_from_this();
-    boost::asio::async_connect(_master_socket, endpoints, [this, self](boost::system::error_code ec, tcp::endpoint) {
-        if (!ec) {
-            SPDLOG_INFO("Connected to master, starting handshake...");
-
-            _handshake_step = ReplicationStep::Ping;
-            send_ping();
-        } else {
-            SPDLOG_ERROR("Failed to connect to master: {}", ec.message());
-            _replication_timer.expires_after(std::chrono::seconds(5));
-            _replication_timer.async_wait([this](boost::system::error_code ec) {
-                if (!ec) {
-                    connect_to_master();
-                }
-            });
-        }
+    boost::asio::post(_io_context, [this, self]() {
+        boost::asio::ip::tcp::socket socket(_io_context);
+        _master_session = std::make_shared<Redis::Session>(_io_context, std::move(socket), self);
+        _master_session->set_replication_mode(true);
+        _master_session->start_replication(_master_host, _master_port, _port);
     });
-}
-void Server::send_ping()
-{
-    SPDLOG_INFO("Step [{}]: Sending PING...", step_name());
-
-    std::string ping_cmd = "*1\r\n$4\r\nPING\r\n";
-
-    auto self = shared_from_this();
-    boost::asio::async_write(_master_socket, boost::asio::buffer(ping_cmd), [this, self](boost::system::error_code ec, std::size_t) {
-        if (!ec) {
-            _master_socket.async_read_some(boost::asio::buffer(_read_buffer), [this, self](boost::system::error_code ec, std::size_t length) {
-                if (!ec) {
-                    std::string response(_read_buffer.data(), length);
-
-                    if (response.find("+PONG") != std::string::npos) {
-                        SPDLOG_INFO("PING successful, moving to next step");
-                        _handshake_step = ReplicationStep::ReplconfPort;
-                        send_replconf_listening_port();
-                    } else {
-                        SPDLOG_ERROR("Unexpected response, retrying PING");
-                        _replication_timer.expires_after(std::chrono::seconds(5));
-                        _replication_timer.async_wait([this](boost::system::error_code ec) {
-                            if (!ec) {
-                                send_ping(); // 保持在 PING 步骤重试
-                            }
-                        });
-                    }
-                } else {
-                    SPDLOG_ERROR("Error reading PONG: {}", ec.message());
-                }
-            });
-        } else {
-            SPDLOG_ERROR("Failed to send PING: {}", ec.message());
-        }
-    });
-}
-void Server::send_replconf_listening_port()
-{
-    // std::string replconf_cmd = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$"
-    //     + std::to_string(std::to_string(_port).length()) + "\r\n"
-    //     + std::to_string(_port) + "\r\n";
-
-    // 端口信息
-    std::vector<std::string> replconf_vec;
-    replconf_vec.reserve(3);
-    replconf_vec.emplace_back("REPLCONF");
-    replconf_vec.emplace_back("listening-port");
-    replconf_vec.push_back(std::to_string(std::to_string(_port).length()));
-    std::string replconf_cmd = RESPEncoder::encode_array(replconf_vec);
-
-    SPDLOG_INFO("Step [{}]: Sending REPLICONF listening-port {}", step_name(), _port);
-
-    auto self = shared_from_this();
-
-    boost::asio::async_write(_master_socket, boost::asio::buffer(replconf_cmd), [this, self](boost::system::error_code ec, std::size_t) {
-        if (!ec) {
-            _master_socket.async_read_some(boost::asio::buffer(_read_buffer), [this, self](boost::system::error_code ec, std::size_t length) {
-                if (!ec) {
-                    std::string response(_read_buffer.data(), length);
-
-                    if (response.find("+OK") != std::string::npos) {
-                        SPDLOG_INFO("REPLCONF listening-port successful, moving to next step");
-                        _handshake_step = ReplicationStep::ReplconfCapa;
-                        send_replconf_capa();
-                    } else {
-                        SPDLOG_ERROR("Unexpected response, retrying REPLCONF listening-port");
-                        _replication_timer.expires_after(std::chrono::seconds(5));
-                        _replication_timer.async_wait([this](boost::system::error_code ec) {
-                            if (!ec) {
-                                send_replconf_listening_port();
-                            }
-                        });
-                    }
-                } else {
-
-                    SPDLOG_ERROR("Error reading REPLCONF response: {}", ec.message());
-                }
-            });
-        } else {
-            SPDLOG_ERROR("Failed to send REPLCONF listening-port: {}", ec.message());
-        }
-    });
-}
-void Server::send_replconf_capa()
-{
-    std::string replconf_cmd1 = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$3\r\neof\r\n";
-    std::string replconf_cmd2 = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
-
-    SPDLOG_INFO("Step [{}]: Sending REPLCONF capa eof & psync2", step_name());
-
-    auto self = shared_from_this();
-    boost::asio::async_write(_master_socket, boost::asio::buffer(replconf_cmd1), [this, self, replconf_cmd2](boost::system::error_code ec, std::size_t) {
-        if (ec) {
-            SPDLOG_ERROR("Failed to send REPLCONF capa: {}", ec.message());
-        }
-
-        boost::asio::async_write(_master_socket, boost::asio::buffer(replconf_cmd2), [this, self](boost::system::error_code ec, std::size_t) {
-            if (ec) {
-                SPDLOG_ERROR("Failed to send REPLCONF capa: {}", ec.message());
-            }
-            read_replconf_responses(2);
-        });
-    });
-}
-void Server::send_psync()
-{
-
-    // PSYNC ? -1
-    std::string psync_cmd = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
-
-    SPDLOG_INFO("Step [{}]: Sending PSYNC ? -1...", step_name());
-
-    auto self = shared_from_this();
-
-    boost::asio::async_write(_master_socket, boost::asio::buffer(psync_cmd), [this, self](boost::system::error_code ec, std::size_t) {
-        if (ec) { // 先检查错误
-            SPDLOG_ERROR("Failed to send PSYNC: {}", ec.message());
-            return;
-        }
-        // 等待 FULLRESYNC 响应
-
-        boost::asio::async_read_until(_master_socket, _stream, "\r\n", [this, self](boost::system::error_code ec, std::size_t length) {
-            if (ec) { // 先检查读取错误
-                SPDLOG_ERROR("Error reading PSYNC response: {}", ec.message());
-                return;
-            }
-
-            std::string response(boost::asio::buffers_begin(_stream.data()), boost::asio::buffers_begin(_stream.data()) + length);
-            if (response.find("+FULLRESYNC") != std::string::npos) {
-                SPDLOG_INFO("PSYNC successful, replication handshake complete!");
-                _handshake_step = ReplicationStep::Complete;
-
-                size_t space1 = response.find(' ');
-                size_t space2 = response.find(' ', space1 + 1);
-
-                if (space1 != std::string::npos && space2 != std::string::npos) {
-                    std::string master_replid = response.substr(space1 + 1, space2 - space1 - 1);
-                    std::string offset_str = response.substr(space2 + 1);
-
-                    if (!offset_str.empty() && offset_str.back() == '\n') {
-                        offset_str.pop_back();
-                    }
-                    if (!offset_str.empty() && offset_str.back() == '\r') {
-                        offset_str.pop_back();
-                    }
-
-                    this->_master_replid = master_replid;
-                    this->_offset_str = offset_str;
-
-                    SPDLOG_INFO("Replication handshake complete! Master replid: {}, offset: {}", master_replid, offset_str);
-                }
-            } else if (response.find("+CONTINUE") != std::string::npos) {
-
-            } else {
-                SPDLOG_ERROR("Unexpected PSYNC response, retrying PSYNC");
-            }
-        });
-    });
-}
-void Server::handler_master_response(const boost::system::error_code& ec, std::size_t bytes_transferred)
-{
-}
-void Server::read_replconf_responses(int remaining)
-{
-    if (remaining <= 0) {
-        SPDLOG_INFO("Step [{}]: REPLCONF capa successful, moving to next step", step_name());
-        _handshake_step = ReplicationStep::Psync;
-        send_psync();
-        return;
-    }
-
-    SPDLOG_INFO("Step [{}]: Waiting for REPLCONF response, {} remaining...", step_name(), remaining);
-    auto self = shared_from_this();
-    boost::asio::async_read(_master_socket, boost::asio::buffer(_read_buffer, 5),
-        [this, self, remaining](boost::system::error_code ec, std::size_t length) {
-            std::cout << "read" << std::endl;
-            if (!ec) {
-                std::string response(_read_buffer.data(), length);
-
-                if (response.find("+OK") != std::string::npos) {
-                    read_replconf_responses(remaining - 1);
-                } else {
-                    SPDLOG_ERROR("Unexpected REPLCONF response, retrying. Received: {}", response);
-                    _replication_timer.expires_after(std::chrono::seconds(1));
-                    _replication_timer.async_wait([this, remaining, self](boost::system::error_code ec) {
-                        if (!ec) {
-                            read_replconf_responses(remaining - 1);
-                        }
-                    });
-                }
-            } else {
-                SPDLOG_ERROR("Error reading REPLCONF response: {}", ec.message());
-            }
-        });
 }
 
 std::string Server::info(const std::string& section) const
@@ -620,7 +468,7 @@ std::string Server::info(const std::string& section) const
             response << "slave_repl_offset:" << _repl_offset << "\r\n";
         } else {
             response << "role:master\r\n";
-            response << "connected_slaves:0\r\n";
+            response << "connected_slaves:" << _replicas.size() << "\r\n";
             response << "master_replid:" << _repl_id << "\r\n";
             response << "master_repl_offset:" << _repl_offset << "\r\n";
             response << "second_repl_offset:-1\r\n";
@@ -664,7 +512,7 @@ void Server::collection_server()
 {
     _repl_id.reserve(40);
     _repl_id = generate_id();
-    _repl_offset = "0";
+    _repl_offset = 0;
 }
 void Server::collection_system()
 {

@@ -202,6 +202,13 @@
             "min_args": 2,
             "max_args": 2,
             "description": "Replication synchronization"
+        },
+        {
+            "name": "WAIT",
+            "handler": "wait",
+            "min_args": 2,
+            "max_args": 2,
+            "description": "Wait for replicas to acknowledge writes"
         }
     ]
 }

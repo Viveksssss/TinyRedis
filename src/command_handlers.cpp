@@ -9,10 +9,17 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 
+#include <boost/asio/as_tuple.hpp> // as_tuple（如果用 C++23 风格）
+#include <boost/asio/basic_waitable_timer.hpp>
+#include <boost/asio/redirect_error.hpp> // redirect_error（如果用）
+#include <boost/asio/steady_timer.hpp> // steady_timer
+#include <boost/asio/this_coro.hpp> // this_coro::executor
+#include <boost/asio/use_awaitable.hpp> // use_awaitable
 #include <spdlog/spdlog.h>
 
 std::shared_ptr<Redis::Server> _server = nullptr;
@@ -64,6 +71,7 @@ void CommandHandlers::register_all()
     registry.register_handler("info", info);
     registry.register_handler("replconf", replconf);
     registry.register_handler("psync", psync);
+    registry.register_handler("wait", wait);
 }
 
 std::string CommandHandlers::ping(const std::vector<std::string>& args)
@@ -842,10 +850,79 @@ std::string CommandHandlers::psync(const std::vector<std::string>& args)
     const std::string& offset = args[2];
 
     if (replid == "?" && offset == "-1") {
-        std::string response = "+FULLRESYNC " + _server->replid() + " " + _server->repl_offset() + "\r\n";
+        std::string response = "+FULLRESYNC " + _server->replid() + " " + std::to_string(_server->repl_offset()) + "\r\n";
         return response; // 直接返回字符串，不是 bulk string
     }
     return RESPEncoder::encode_error("unsupported PSYNC parameters");
+}
+
+Task<std::string> CommandHandlers::wait(const std::vector<std::string>& args)
+{
+    if (args.size() != 3) {
+        co_return RESPEncoder::encode_error("ERR wrong number of arguments for 'wait' command");
+    }
+
+    // 解析参数
+    int numreplicas;
+    int timeout_ms;
+
+    try {
+        numreplicas = std::stoi(args[1]);
+        timeout_ms = std::stoi(args[2]);
+    } catch (const std::exception& e) {
+        co_return RESPEncoder::encode_error("value is not an integer or out of range");
+    }
+
+    if (numreplicas < 0 || timeout_ms < 0) {
+        co_return RESPEncoder::encode_error("value is not an integer or out of range");
+    }
+
+    std::size_t target_offset = _server->repl_offset();
+
+    if (numreplicas == 0 || _server->replica_count() == 0) {
+        size_t acked = _server->count_replicas_with_offset_ge(target_offset);
+        co_return RESPEncoder::encode_integer(acked);
+    }
+
+    size_t current_acks = _server->count_replicas_with_offset_ge(target_offset);
+
+    if (current_acks >= static_cast<size_t>(numreplicas)) {
+        co_return RESPEncoder::encode_integer(current_acks);
+    }
+
+    auto ctx = std::make_shared<Server::WaitContext>();
+    ctx->target_offset = target_offset;
+    ctx->required_replicas = numreplicas;
+    ctx->deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+
+    auto promise = std::make_shared<std::promise<size_t>>();
+    ctx->promise = promise;
+    auto future = promise->get_future();
+
+    _server->register_wait(ctx);
+    _server->send_getack_to_all();
+
+    size_t result;
+    if (timeout_ms > 0) {
+        ctx->timer = std::make_shared<boost::asio::steady_timer>(_server->io_context());
+        ctx->timer->expires_after(std::chrono::milliseconds(timeout_ms));
+        ctx->timer->async_wait([promise, target_offset, server = _server](const boost::system::error_code& ec) {
+            if (!ec) {
+                // 超时发生，返回当前已确认的数量
+                try {
+                    size_t acked = server->count_replicas_with_offset_ge(target_offset);
+                    promise->set_value(acked);
+                } catch (const std::future_error& e) {
+                    // promise 已经被设置过了，忽略
+                }
+            }
+        });
+    }
+    AwaitableFuture<size_t> awaitable { std::move(future) };
+    SPDLOG_INFO("Waiting for WAIT result...");
+    result = co_await awaitable;
+    SPDLOG_INFO("WAIT got result: {}", result);
+    co_return RESPEncoder::encode_integer(result);
 }
 
 }

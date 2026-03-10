@@ -48,6 +48,7 @@ public:
     static std::string info(const std::vector<std::string>& args);
     static std::string replconf(const std::vector<std::string>& args);
     static std::string psync(const std::vector<std::string>& args);
+    static Task<std::string> wait(const std::vector<std::string>& args);
 };
 
 }
