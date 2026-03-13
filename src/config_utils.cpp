@@ -8,6 +8,27 @@
 
 namespace Redis::Config {
 
+Config::Config()
+{
+    const char* home = std::getenv("HOME");
+    if (!home) {
+        home = std::getenv("USERPROFILE");
+    }
+    if (!home) {
+        const char* drive = std::getenv("HOMEDRIVE");
+        const char* path = std::getenv("HOMEPATH");
+        if (drive && path) {
+            static std::string combined = std::string(drive) + path;
+            home = combined.data();
+        }
+    }
+    if (!home) {
+        home = ".";
+    }
+
+    this->dir = home;
+}
+
 Config from_args(int argc, char** argv)
 {
     Config config;
@@ -45,6 +66,16 @@ Config from_args(int argc, char** argv)
             if (is_valid_address(config.master_host)) {
                 config.is_replication = true;
             }
+        } else if (arg == "--dir") {
+            if (++i >= argc) {
+                throw std::runtime_error("--dir requires an argument");
+            }
+            config.dir = argv[i];
+        } else if (arg == "--dbfilename") {
+            if (++i >= argc) {
+                throw std::runtime_error("--dbfilename requires an argument");
+            }
+            config.db_filename = argv[i];
         } else {
             throw std::runtime_error(std::string("Unknown option: ") + std::string(arg));
         }

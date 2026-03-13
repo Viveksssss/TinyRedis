@@ -1,5 +1,6 @@
 #include "command_handlers.hpp"
 #include "command_registry.hpp"
+#include "match_utils.hpp"
 #include "resp_parse.hpp"
 #include "server.hpp"
 #include "storage.hpp"
@@ -9,6 +10,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -47,6 +49,8 @@ void CommandHandlers::register_all()
     registry.register_handler("exec", exec);
     registry.register_handler("watch", watch);
     registry.register_handler("discard", discard);
+    registry.register_handler("ttl", ttl);
+    registry.register_handler("pttl", pttl);
 
     registry.register_handler("rpush", rpush);
     registry.register_handler("lpush", lpush);
@@ -72,6 +76,10 @@ void CommandHandlers::register_all()
     registry.register_handler("replconf", replconf);
     registry.register_handler("psync", psync);
     registry.register_handler("wait", wait);
+    registry.register_handler("config", config);
+    registry.register_handler("keys", keys);
+    registry.register_handler("save", save);
+    registry.register_handler("bgsave", bgsave);
 }
 
 std::string CommandHandlers::ping(const std::vector<std::string>& args)
@@ -231,6 +239,33 @@ std::string CommandHandlers::watch(const std::vector<std::string>& args)
         return RESPEncoder::encode_error("ERR wrong number of arguments for 'watch' command");
     }
     return RESPEncoder::encode_simple_string("OK");
+}
+
+std::string CommandHandlers::ttl(const std::vector<std::string>& args)
+{
+    if (args.size() != 2) {
+        return RESPEncoder::encode_error("wrong number of arguments for 'ttl' command");
+    }
+
+    std::string key = args[1];
+    auto& storage = Storage::instance();
+
+    int64_t remaining = storage.ttl(key);
+
+    return RESPEncoder::encode_integer(remaining);
+}
+std::string CommandHandlers::pttl(const std::vector<std::string>& args)
+{
+    if (args.size() != 2) {
+        return RESPEncoder::encode_error("wrong number of arguments for 'pttl' command");
+    }
+
+    std::string key = args[1];
+    auto& storage = Storage::instance();
+
+    int64_t remaining = storage.pttl(key);
+
+    return RESPEncoder::encode_integer(remaining);
 }
 
 std::string CommandHandlers::rpush(const std::vector<std::string>& args)
@@ -833,11 +868,6 @@ std::string CommandHandlers::replconf(const std::vector<std::string>& args)
     // 对于这个阶段，我们忽略所有参数，直接返回 +OK
     // 后续阶段可以在这里记录 replica 的信息
 
-    SPDLOG_INFO("Received REPLCONF :");
-    for (const auto& arg : args) {
-        SPDLOG_INFO("{}", arg);
-    }
-
     return RESPEncoder::encode_simple_string("OK");
 }
 std::string CommandHandlers::psync(const std::vector<std::string>& args)
@@ -925,4 +955,101 @@ Task<std::string> CommandHandlers::wait(const std::vector<std::string>& args)
     co_return RESPEncoder::encode_integer(result);
 }
 
+std::string CommandHandlers::config(const std::vector<std::string>& args)
+{
+    if (args.size() < 3) {
+        return RESPEncoder::encode_error("wrong number of arguments for 'config' command");
+    }
+
+    std::string sub_cmd = args[1];
+    for (auto& c : sub_cmd) {
+        c = toupper(c);
+    }
+
+    std::string param = args[2];
+    for (auto& c : param) {
+        c = tolower(c); // 参数名不区分大小写
+    }
+
+    std::string value;
+    if (sub_cmd == "GET") {
+        if (param == "dir") {
+            value = _server->get_dir();
+        } else if (param == "dbfilename") {
+            value = _server->get_dbfilename();
+        } else {
+            return RESPEncoder::encode_error("unknown CONFIG parameter");
+        }
+    } else if (sub_cmd == "SET") {
+        if (args.size() != 4) {
+            return RESPEncoder::encode_error("wrong number of arguments for 'config set' command");
+        }
+        value = args[3];
+
+        if (param == "dir") {
+            _server->set_dir(value);
+        } else if (param == "dbfilename") {
+            _server->set_dbfilename(value);
+        } else {
+            return RESPEncoder::encode_error("unknown CONFIG parameter");
+        }
+    } else {
+        return "*0\r\n";
+    }
+
+    std::vector<std::string> result = { param, value };
+    return RESPEncoder::encode_array(result);
 }
+
+std::string CommandHandlers::keys(const std::vector<std::string>& args)
+{
+    if (args.size() != 2) {
+        return RESPEncoder::encode_error("wrong number of arguments for 'keys' command");
+    }
+    std::string pattern = args[1];
+    std::vector<std::string> all_keys;
+
+    all_keys.reserve(Storage::instance().size() + 1);
+    for (const auto& key : Storage::instance().keys()) {
+        if (Utils::MatchUtils::match_pattern(key, pattern)) {
+            all_keys.push_back(key);
+        }
+    }
+
+    return RESPEncoder::encode_array(all_keys);
+}
+
+std::string CommandHandlers::save(const std::vector<std::string>& args)
+{
+    if (args.size() != 1) {
+        return bgsave(args);
+    }
+
+    if (_server->save_rdb_file()) {
+        return RESPEncoder::encode_simple_string("OK");
+    } else {
+        return RESPEncoder::encode_error("saving RDB file failed");
+    }
+}
+
+std::string CommandHandlers::bgsave(const std::vector<std::string>& args)
+{
+    if (args.size() != 3) {
+        return RESPEncoder::encode_error("wrong number of arguments for 'bgsave' command");
+    }
+
+    std::size_t timeout;
+    std::size_t frequency;
+    try {
+
+        timeout = std::stoll(args[1]);
+        frequency = std::stoll(args[2]);
+
+    } catch (const std::exception& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+    _server->add_condition(timeout, frequency);
+    return RESPEncoder::encode_null_bulk_string();
+}
+
+} // namespace

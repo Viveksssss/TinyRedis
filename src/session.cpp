@@ -315,6 +315,7 @@ void Session::replication_send_psync()
             return;
         }
 
+        // *3\r\n$11\r\n+FULLRESYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n
         boost::asio::async_read_until(_socket, _repl_stream, "\r\n", [this, self](boost::system::error_code ec, std::size_t length) {
             if (ec) {
                 SPDLOG_ERROR("Replication error reading PSYNC response: {}", ec.message());
@@ -328,7 +329,101 @@ void Session::replication_send_psync()
             if (response.find("+FULLRESYNC") != std::string::npos) {
                 SPDLOG_INFO("Replication PSYNC FULLRESYNC received, handshake complete");
                 _replication_step = ReplicationStep::Complete;
-                replication_start_command_stream();
+
+                // $<length>\r\n
+                boost::asio::async_read_until(_socket, _repl_stream, "\r\n",
+                    [this, self, response](boost::system::error_code ec, std::size_t length) {
+                        if (ec) {
+                            SPDLOG_ERROR("Error reading RDB length: {}", ec.message());
+                            return;
+                        }
+
+                        // 解析长度行
+                        std::string len_line(
+                            boost::asio::buffers_begin(_repl_stream.data()),
+                            boost::asio::buffers_begin(_repl_stream.data()) + length);
+                        _repl_stream.consume(length);
+
+                        if (len_line.empty() || len_line[0] != '$') {
+                            SPDLOG_ERROR("Invalid RDB length line: {}", len_line);
+                            return;
+                        }
+
+                        size_t rdb_len = std::stoul(len_line.substr(1));
+                        // SPDLOG_INFO("RDB file length: {} bytes", rdb_len);
+
+                        auto rdb_buffer = std::make_shared<std::vector<char>>();
+                        rdb_buffer->resize(rdb_len);
+
+                        size_t buffered = _repl_stream.size();
+                        if (buffered >= rdb_len) {
+                            std::istream is(&_repl_stream);
+                            is.read(&(*rdb_buffer)[0], rdb_len);
+
+                            SPDLOG_INFO("RDB data already in buffer, size: {} bytes", rdb_len);
+                            if (_server) {
+                                _server->load_from_rdb(std::string(rdb_buffer->begin(), rdb_buffer->end()));
+                            }
+                            replication_start_command_stream();
+                        } else {
+                            size_t remaining = rdb_len - buffered;
+                            if (buffered > 0) {
+                                std::istream is(&_repl_stream);
+                                is.read(&(*rdb_buffer)[0], buffered);
+                            }
+
+                            boost::asio::async_read(_socket,
+                                boost::asio::buffer(&(*rdb_buffer)[buffered], remaining),
+                                boost::asio::transfer_exactly(rdb_len), // 关键：强制读够
+                                [this, self, rdb_buffer](boost::system::error_code ec, std::size_t bytes) {
+                                    if (ec && ec != boost::asio::error::eof) {
+                                        SPDLOG_ERROR("RDB read error: {}", ec.message());
+                                        return;
+                                    }
+
+                                    SPDLOG_INFO("RDB received: {}/{} bytes", bytes, rdb_buffer->size());
+
+                                    // 检查 RDB 头部
+                                    if (bytes >= 5) {
+                                        std::string magic(rdb_buffer->data(), 5);
+                                        SPDLOG_INFO("RDB magic: {}", magic); // 应该是 "REDIS"
+                                    }
+
+                                    // 加载 RDB
+                                    if (_server) {
+                                        _server->load_from_rdb(std::string(rdb_buffer->begin(), rdb_buffer->end()));
+                                    }
+
+                                    replication_start_command_stream();
+                                });
+                        }
+                        // binary read
+                        //     boost::asio::async_read_until(_socket, _repl_stream, "\r\n",
+                        //         [this, self, rdb_buffer](boost::system::error_code ec, std::size_t length) {
+                        //             if (ec) {
+                        //                 SPDLOG_ERROR("Error reading RDB data: {}", ec.message());
+                        //                 return;
+                        //             }
+
+                        //             std::string len_line(
+                        //                 boost::asio::buffers_begin(_repl_stream.data()),
+                        //                 boost::asio::buffers_begin(_repl_stream.data()) + length);
+                        //             _repl_stream.consume(length);
+
+                        //             SPDLOG_INFO("RDB file received, size: {} bytes", rdb_buffer->size());
+
+                        //             // 4. 加载 RDB 到存储
+                        //             if (_server) {
+                        //                 // 将vector<char>转换为string
+                        //                 SPDLOG_INFO("rdb:{}", len_line);
+                        //                 _server->load_from_rdb(std::move(len_line));
+                        //             }
+
+                        //             // 5. 开始命令流复制
+                        //             replication_start_command_stream();
+                        //         });
+                    });
+
             } else if (response.find("+CONTINUE") != std::string::npos) {
                 SPDLOG_INFO("Replication PSYNC CONTINUE received, handshake complete");
                 _replication_step = ReplicationStep::Complete;
@@ -358,7 +453,7 @@ void Session::do_write(const std::string& response)
             handle_error(ec, "write");
         }
     };
-    boost::asio::async_write(_socket, boost::asio::buffer(response), handler);
+    boost::asio::async_write(_socket, boost::asio::buffer(response.data(), response.size()), handler);
 }
 
 bool Session::replica_process(std::string_view cmd, const std::vector<std::string>& command)
@@ -371,7 +466,6 @@ bool Session::replica_process(std::string_view cmd, const std::vector<std::strin
     } else if (_handshake_state == HandshakeState::PingReceived && cmd == "REPLCONF") {
         if (command.size() >= 3 && command[1] == "listening-port") {
             _handshake_state = HandshakeState::RepliconfPortReceived;
-            SPDLOG_INFO("Received REPLCONF listening-port from replica {}", get_peer_info());
 
             do_write(RESPEncoder::encode_simple_string("OK"));
             return true;
@@ -379,7 +473,6 @@ bool Session::replica_process(std::string_view cmd, const std::vector<std::strin
     } else if (_handshake_state == HandshakeState::RepliconfPortReceived && cmd == "REPLCONF") {
         if (command.size() >= 3 && command[1] == "capa") {
             _handshake_state = HandshakeState::RepliconfCapaReceived;
-            SPDLOG_INFO("Received REPLCONF capa from replica {}", get_peer_info());
 
             do_write(RESPEncoder::encode_simple_string("OK"));
             return true;
@@ -597,6 +690,7 @@ normal_process:
             resp_command += "$" + std::to_string(arg.size()) + "\r\n";
             resp_command += arg + "\r\n";
         }
+        _server->note_key_change();
 
         std::size_t cmd_length = calculate_command_length(command);
         _server->add_to_offset(cmd_length);

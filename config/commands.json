@@ -209,6 +209,48 @@
             "min_args": 2,
             "max_args": 2,
             "description": "Wait for replicas to acknowledge writes"
+        },
+        {
+            "name": "CONFIG",
+            "handler": "config",
+            "min_args": 2,
+            "max_args": -1,
+            "description": "Get or set configuration parameters"
+        },
+        {
+            "name": "KEYS",
+            "handler": "keys",
+            "min_args": 1,
+            "max_args": 1,
+            "description": "Returns all keys matching pattern"
+        },
+        {
+            "name": "SAVE",
+            "handler": "save",
+            "min_args": 0,
+            "max_args": 2,
+            "description": "Synchronously save the dataset to disk"
+        },
+        {
+            "name": "BGSAVE",
+            "handler": "bgsave",
+            "min_args": 0,
+            "max_args": 0,
+            "description": "Asynchronously save the dataset to disk"
+        },
+        {
+            "name": "TTL",
+            "handler": "ttl",
+            "min_args": 1,
+            "max_args": 1,
+            "description": "Get the time to live for a key in seconds"
+        },
+        {
+            "name": "PTTL",
+            "handler": "pttl",
+            "min_args": 1,
+            "max_args": 1,
+            "description": "Get the time to live for a key in milliseconds"
         }
     ]
 }

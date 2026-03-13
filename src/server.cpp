@@ -1,6 +1,7 @@
 #include "server.hpp"
 
 #include <boost/asio/ip/address.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/streambuf.hpp>
 #include <boost/system/detail/error_code.hpp>
 #include <chrono>
@@ -19,7 +20,9 @@
 
 #include "command_handlers.hpp"
 #include "command_registry.hpp"
+#include "rdb_parser.hpp"
 #include "session.hpp"
+#include "storage.hpp"
 
 namespace Redis {
 
@@ -72,6 +75,52 @@ Server::Server(boost::asio::io_context& io_context, const std::string& address, 
     _master_port = master_port;
     _role = "replication";
     _is_replication = true;
+
+    _dir = '.';
+    _db_filename = "dump.rdb";
+}
+
+Server::Server(boost::asio::io_context& io_context, const std::string& address, short port,
+    const std::string& dir, const std::string& dbfilename)
+    : Server(io_context, address, port) // 委托给基础构造函数
+{
+    _dir = dir;
+    _db_filename = dbfilename;
+    load_rdb_file();
+
+    boost::asio::steady_timer timer(_io_context, std::chrono::seconds(1));
+    timer.async_wait([this](const boost::system::error_code& error) {
+        set_save_conditions(_save_conditions);
+    });
+}
+
+Server::Server(boost::asio::io_context& io_context, const std::string& address, short port, const std::string& master_host, short master_port, const std::string& dir, const std::string& dbfilename)
+    : Server(io_context, address, port, master_host, master_port)
+{
+    _dir = dir;
+    _db_filename = dbfilename;
+    load_rdb_file();
+    boost::asio::steady_timer timer(_io_context, std::chrono::seconds(1));
+    timer.async_wait([this](const boost::system::error_code& error) {
+        set_save_conditions(_save_conditions);
+    });
+}
+
+void Server::stop()
+{
+    if (_stopped.exchange(true)) {
+        return;
+    }
+
+    SPDLOG_INFO("Stopping server...");
+
+    _save_monitor_running = false;
+    _acceptor.close();
+    _io_context.stop();
+
+    save_rdb_file();
+
+    SPDLOG_INFO("Server stopped");
 }
 
 void Server::register_wait(std::shared_ptr<WaitContext> ctx)
@@ -146,6 +195,26 @@ std::string Server::get_empty_rdb_content() const
     return hex_to_binary(hex);
 }
 
+std::string Server::get_rdb_content() const
+{
+    std::string binary;
+    if (_db_filename.empty()) {
+
+        binary = get_empty_rdb_content();
+    } else {
+        std::ifstream file(_dir + "/" + _db_filename, std::ios::binary);
+        if (file.is_open()) {
+            file.seekg(0, std::ios::end);
+            std::streampos size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            binary.resize(size);
+            file.read(reinterpret_cast<char*>(binary.data()), size); // ← 加上这行！
+            file.close();
+        }
+    }
+    return binary;
+}
+
 std::string Server::get_empty_rdb_hex() const
 {
     return "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
@@ -164,16 +233,156 @@ std::string Server::hex_to_binary(const std::string& hex) const
     return binary;
 }
 
+bool Server::save_rdb_file()
+{
+    if (!_bgsave_running.exchange(true)) {
+
+        auto& storage = Storage::instance();
+        auto& data = storage.get_store(); // 需要这个方法
+
+        RDBWriter writer(_dir, _db_filename);
+
+        bool ok = writer.save(data);
+        _bgsave_running = false;
+        return ok; // 返回保存是否成功
+    } else {
+        return false;
+    }
+}
+
+void Server::add_condition(std::size_t timeout, std::size_t frequency)
+{
+    _save_conditions.push_back({ timeout, frequency });
+}
+
+void Server::set_save_conditions(const std::vector<SaveCondition>& conditions)
+{
+    _save_conditions = conditions;
+    _last_save_time = std::chrono::steady_clock::now();
+
+    if (!_save_monitor_running.exchange(true)) {
+        _save_monitor_thread = std::make_unique<std::thread>([this]() {
+            while (_save_monitor_running) {
+                check_auto_save();
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+        });
+        _save_monitor_thread->detach();
+    }
+}
+void Server::note_key_change()
+{
+    _key_changes++;
+}
+void Server::check_auto_save()
+{
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        now - _last_save_time)
+                       .count();
+    std::size_t changes = _key_changes.load();
+
+    for (const auto& cond : _save_conditions) {
+        if (elapsed >= cond.seconds && changes >= cond.changes) {
+            // 条件满足，触发 BGSAVE
+            SPDLOG_INFO("Auto-save triggered: {} seconds, {} changes",
+                cond.seconds, cond.changes);
+
+            // 重置计数和时间
+            _key_changes = 0;
+            _last_save_time = now;
+
+            // 执行 BGSAVE
+            save_rdb_file();
+            break;
+        }
+    }
+}
+
+bool Server::load_rdb_file()
+{
+    parser = RDBParser(_dir, _db_filename);
+    if (!parser.parse()) {
+        SPDLOG_INFO("{}: No RDB file found or file is corrupted,starting with an empty database", parser.error());
+        save_rdb_file();
+        return false;
+    }
+    _rdb_data = parser.get_keys();
+    auto& storage = Storage::instance();
+    for (const auto& [key, value] : _rdb_data) {
+        if (value.type == ValueType::STRING) {
+            // 字符串类型
+            std::string str_value = std::get<std::string>(value.value);
+            if (!value.has_expiry) {
+                storage.set_string(key, str_value);
+            } else {
+                auto timeout = std::chrono::duration_cast<std::chrono::milliseconds>(value.expiry - std::chrono::steady_clock::now());
+                storage.set_string_with_expiry_ms(key, str_value, timeout);
+            }
+            SPDLOG_DEBUG("Loaded string: {} = {}", key, str_value);
+        } else if (value.type == ValueType::LIST) {
+            // 列表类型
+            ListValue list_value = std::get<ListValue>(value.value);
+
+            // 创建流或直接存储为列表
+            // 这里我们直接用列表存储
+            storage.get_store()[key] = ValueWithExpiry(list_value);
+
+            SPDLOG_DEBUG("Loaded list: {} with {} elements", key, list_value.size());
+        } else {
+            SPDLOG_WARN("Unknown type for key: {}", key);
+        }
+    }
+    return true;
+}
+
+bool Server::load_from_rdb(const std::string& rdb)
+{
+    RDBParser parser(rdb);
+    if (!parser.parse()) {
+        SPDLOG_INFO("{}: No RDB file found or file is corrupted,starting with an empty database", parser.error());
+        save_rdb_file();
+        return false;
+    }
+    _rdb_data = parser.get_keys();
+    auto& storage = Storage::instance();
+    for (const auto& [key, value] : _rdb_data) {
+        if (value.type == ValueType::STRING) {
+            // 字符串类型
+            std::string str_value = std::get<std::string>(value.value);
+            if (!value.has_expiry) {
+                storage.set_string(key, str_value);
+            } else {
+                auto timeout = std::chrono::duration_cast<std::chrono::milliseconds>(value.expiry - std::chrono::steady_clock::now());
+                storage.set_string_with_expiry_ms(key, str_value, timeout);
+            }
+            SPDLOG_DEBUG("Loaded string: {} = {}", key, str_value);
+        } else if (value.type == ValueType::LIST) {
+            // 列表类型
+            ListValue list_value = std::get<ListValue>(value.value);
+
+            // 创建流或直接存储为列表
+            // 这里我们直接用列表存储
+            storage.get_store()[key] = ValueWithExpiry(list_value);
+
+            SPDLOG_DEBUG("Loaded list: {} with {} elements", key, list_value.size());
+        } else {
+            SPDLOG_WARN("Unknown type for key: {}", key);
+        }
+    }
+    return true;
+}
+
 void Server::send_rdb_file(std::shared_ptr<Session> session)
 {
-    std::string rdb_content = get_empty_rdb_content();
+    std::string rdb_content = get_rdb_content();
     size_t rdb_length = rdb_content.length();
 
     // 格式: $<length>\r\n<binary_contents>
     // RESP Bulk String requires trailing \r\n after the payload.
     std::string rdb_response = "$" + std::to_string(rdb_length) + "\r\n" + rdb_content + "\r\n";
 
-    SPDLOG_INFO("Sending empty RDB file, length: {} bytes", rdb_length);
+    SPDLOG_INFO("Sending RDB file, length: {} bytes", rdb_length);
 
     // 直接发送给 replica
     session->do_write_raw(rdb_response);
@@ -504,6 +713,11 @@ std::string Server::info(const std::string& section) const
 
 void Server::collection()
 {
+
+    _save_conditions.push_back({ 900, 1 }); // 900秒 1个变化
+    _save_conditions.push_back({ 300, 10 }); // 300秒 10个变化
+    _save_conditions.push_back({ 60, 10000 }); // 60秒 10000个变化
+
     collection_server();
     collection_system();
 }
@@ -579,5 +793,4 @@ void Server::do_accept()
         do_accept();
     });
 }
-
 }

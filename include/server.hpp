@@ -1,5 +1,9 @@
 #pragma once
 
+#include "rdb_parser.hpp"
+#include "rdb_writer.hpp"
+#include "storage.hpp"
+#include <atomic>
 #include <boost/asio.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -7,6 +11,7 @@
 #include <cstdint>
 #include <future>
 #include <memory>
+#include <unordered_map>
 
 namespace Redis {
 
@@ -15,9 +20,18 @@ class Server : public std::enable_shared_from_this<Server> {
 public:
     Server(boost::asio::io_context& io_context, const std::string& address, short port);
     Server(boost::asio::io_context& io_context, const std::string& address, short port, const std::string& master_host, short master_port);
+    Server(boost::asio::io_context& io_context, const std::string& address, short port,
+        const std::string& dir, const std::string& dbfilename);
+    Server(boost::asio::io_context& io_context, const std::string& address, short port,
+        const std::string& master_host, short master_port, const std::string& dir, const std::string& dbfilename);
+
+    void stop();
+
     // Must be called after Server is owned by a shared_ptr (i.e. after construction).
     void start_replication();
     boost::asio::io_context& io_context() { return _io_context; }
+
+    std::atomic<bool> _stopped { false };
 
 public:
     struct WaitContext {
@@ -66,11 +80,6 @@ public:
     void decrement_replica_count() { _replica_count--; }
 
 private:
-    /* RDB */
-    std::string get_empty_rdb_content() const;
-    std::string get_empty_rdb_hex() const;
-    std::string hex_to_binary(const std::string& hex) const;
-
     // replica 连接管理
     std::vector<std::weak_ptr<Session>> _replicas;
     std::mutex _replicas_mutex;
@@ -116,6 +125,48 @@ private:
     std::uint16_t _master_port;
     std::string _host;
     std::uint16_t _port;
+    /* RDB */
+private:
+    std::string get_empty_rdb_content() const;
+    std::string get_empty_rdb_hex() const;
+    std::string get_rdb_content() const;
+    std::string hex_to_binary(const std::string& hex) const;
+    bool load_rdb_file();
+
+    std::string _dir;
+    std::string _db_filename;
+    RDBParser parser;
+    RDBWriter writer;
+    std::unordered_map<std::string, ValueWithExpiry> _rdb_data;
+    std::atomic<bool> _bgsave_running { false };
+
+public:
+    bool load_from_rdb(const std::string& rdb);
+    std::string get_dir() const { return _dir; }
+    std::string get_dbfilename() const { return _db_filename; }
+    void set_dir(const std::string& dir) { _dir = dir; }
+    void set_dbfilename(const std::string& dbfilename) { _db_filename = dbfilename; }
+    bool save_rdb_file();
+    bool is_bgsave_running() const { return _bgsave_running.load(); }
+
+public:
+    struct SaveCondition {
+        std::size_t seconds; // 时间窗口（秒）
+        std::size_t changes; // 变化的key数量
+    };
+    void set_save_conditions(const std::vector<SaveCondition>& conditions);
+    void note_key_change();
+    void check_auto_save();
+    void add_condition(std::size_t, std::size_t);
+
+private:
+    // 自动保存相关
+    std::vector<SaveCondition> _save_conditions;
+    std::atomic<size_t> _key_changes { 0 };
+    std::chrono::steady_clock::time_point _last_save_time;
+    std::mutex _save_mutex;
+    std::unique_ptr<std::thread> _save_monitor_thread;
+    std::atomic<bool> _save_monitor_running { false };
 };
 
 }

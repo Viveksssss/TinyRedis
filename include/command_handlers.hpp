@@ -23,6 +23,8 @@ public:
     static std::string exec(const std::vector<std::string>& args);
     static std::string discard(const std::vector<std::string>& args);
     static std::string watch(const std::vector<std::string>& args);
+    static std::string ttl(const std::vector<std::string>& args);
+    static std::string pttl(const std::vector<std::string>& args);
 
     // 列表命令
     static std::string rpush(const std::vector<std::string>& args);
@@ -49,6 +51,10 @@ public:
     static std::string replconf(const std::vector<std::string>& args);
     static std::string psync(const std::vector<std::string>& args);
     static Task<std::string> wait(const std::vector<std::string>& args);
+    static std::string config(const std::vector<std::string>& args);
+    static std::string keys(const std::vector<std::string>& args);
+    static std::string save(const std::vector<std::string>& args);
+    static std::string bgsave(const std::vector<std::string>& args);
 };
 
 }

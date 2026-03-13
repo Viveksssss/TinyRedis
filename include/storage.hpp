@@ -181,6 +181,8 @@ class Storage {
 public:
     ~Storage();
     static Storage& instance();
+    std::unordered_map<std::string, ValueWithExpiry>& get_store() { return _store; }
+
     /* 获取版本号 */
     std::optional<uint64_t> get_version(const std::string& key);
     /*
@@ -192,6 +194,11 @@ public:
     void set_string_with_expiry_ms(const std::string& key, const std::string& value, std::chrono::milliseconds ttl);
     /* 获得键 */
     std::optional<std::string> get_string(const std::string& key);
+    /* 获得所有的键 */
+    std::vector<std::string> keys();
+    std::size_t size() const { return _store.size(); }
+    int ttl(std::string& key) ;
+    int pttl(std::string& key) ;
 
     /**
         列表操作****************************************************
@@ -305,7 +312,7 @@ private:
     std::mutex _xread_waiter_mutex;
 
     std::unordered_map<std::string, ValueWithExpiry> _store;
-    std::mutex _mutex;
+    mutable std::mutex _mutex;
     boost::asio::io_context io_context;
 };
 

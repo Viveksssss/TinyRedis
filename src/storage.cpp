@@ -131,6 +131,82 @@ std::optional<std::string> Storage::get_string(const std::string& key)
     return std::get<std::string>(it->second.value);
 }
 
+std::vector<std::string> Storage::keys()
+{
+    std::vector<std::string> all_keys;
+    for (const auto& pair : _store) {
+        all_keys.push_back(pair.first);
+    }
+    return all_keys;
+}
+
+int Storage::ttl(std::string& key)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        return -2; // 键不存在
+    }
+
+    // 检查是否过期
+    if (it->second.is_expired()) {
+        _store.erase(it);
+        return -2; // 键已过期，视为不存在
+    }
+
+    if (!it->second.has_expiry) {
+        return -1; // 永不过期
+    }
+
+    // 计算剩余时间
+    auto now = std::chrono::steady_clock::now();
+    auto remaining = it->second.expiry - now;
+
+    // 如果已经过期
+    if (remaining <= std::chrono::seconds(0)) {
+        _store.erase(it);
+        return -2;
+    }
+
+    // 转换为秒
+    auto remaining_sec = std::chrono::duration_cast<std::chrono::seconds>(remaining).count();
+    return remaining_sec;
+}
+int Storage::pttl(std::string& key)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        return -2; // 键不存在
+    }
+
+    // 检查是否过期
+    if (it->second.is_expired()) {
+        _store.erase(it);
+        return -2; // 键已过期，视为不存在
+    }
+
+    if (!it->second.has_expiry) {
+        return -1; // 永不过期
+    }
+
+    // 计算剩余时间
+    auto now = std::chrono::steady_clock::now();
+    auto remaining = it->second.expiry - now;
+
+    // 如果已经过期
+    if (remaining <= std::chrono::milliseconds(0)) {
+        _store.erase(it);
+        return -2;
+    }
+
+    // 转换为毫秒
+    auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(remaining).count();
+    return remaining_ms;
+}
+
 /**
     列表操作****************************************************
 */
