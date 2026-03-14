@@ -16,6 +16,7 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     add_compile_options(-fcoroutines-ts)
 endif()
 
+
 find_package(Boost REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(nlohmann_json REQUIRED)
@@ -25,6 +26,7 @@ add_executable(redis ${SOURCE_FILES})
 
 target_include_directories(redis PUBLIC
     ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/deps
 )
 
 target_link_libraries(redis PRIVATE Boost::headers)
