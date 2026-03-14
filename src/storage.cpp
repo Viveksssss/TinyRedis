@@ -207,6 +207,287 @@ int Storage::pttl(std::string& key)
     return remaining_ms;
 }
 
+/* 有序集合 */
+
+int Storage::zadd(const std::string& key, double score, const std::string& member)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        SortedSet ss;
+        ss.add(member, score);
+        _store[key]
+            = ValueWithExpiry(std::move(ss));
+        return 1;
+    }
+
+    if (it->second.type != ValueType::SORTED_SET) {
+        throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+    }
+
+    auto* ss = it->second.get_sorted_set_ptr();
+    if (!ss) {
+        throw std::runtime_error("Internal error: invalid sorted set");
+    }
+
+    // 添加成员
+    bool is_new = ss->add(member, score);
+    return is_new ? 1 : 0;
+}
+
+std::optional<int> Storage::zrank(const std::string& key, const std::string& member)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        return std::nullopt; // 键不存在
+    }
+
+    if (it->second.type != ValueType::SORTED_SET) {
+        throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+    }
+
+    auto* ss = it->second.get_sorted_set_ptr();
+    if (!ss) {
+        return std::nullopt;
+    }
+
+    return ss->rank(member);
+}
+
+// 检查是否是 sorted set
+bool Storage::is_sorted_set(const std::string& key) const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        return false;
+    }
+
+    return it->second.type == ValueType::SORTED_SET;
+}
+
+std::optional<std::vector<std::string>> Storage::zrange(
+    const std::string& key, int start, int stop)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        return std::nullopt; // 键不存在
+    }
+
+    if (it->second.type != ValueType::SORTED_SET) {
+        throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+    }
+
+    auto* ss = it->second.get_sorted_set_ptr();
+    if (!ss) {
+        return std::vector<std::string> {}; // 空集合
+    }
+
+    return ss->range(start, stop);
+}
+
+std::optional<std::vector<std::pair<std::string, double>>> Storage::zrangewithscores(
+    const std::string& key, int start, int stop)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        return std::nullopt; // 键不存在
+    }
+
+    if (it->second.type != ValueType::SORTED_SET) {
+        throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+    }
+
+    auto* ss = it->second.get_sorted_set_ptr();
+    if (!ss) {
+        return {}; // 空集合
+    }
+
+    return ss->range_with_scores(start, stop);
+}
+
+std::optional<size_t> Storage::zcard(const std::string& key)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end() || it->second.type != ValueType::SORTED_SET) {
+        return std::nullopt;
+    }
+
+    auto* ss = it->second.get_sorted_set_ptr();
+    if (!ss) {
+        return 0;
+    }
+
+    return ss->size();
+}
+
+bool Storage::zrem(const std::string& key, const std::string& member)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end() || it->second.type != ValueType::SORTED_SET) {
+        return false;
+    }
+
+    auto* ss = it->second.get_sorted_set_ptr();
+    if (!ss) {
+        return false;
+    }
+
+    return ss->remove(member);
+}
+std::optional<size_t> Storage::zcount(const std::string& key, double min, double max)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end() || it->second.type != ValueType::SORTED_SET) {
+        return std::nullopt;
+    }
+
+    auto* ss = it->second.get_sorted_set_ptr();
+    if (!ss) {
+        return 0;
+    }
+
+    return ss->count(min, max);
+}
+std::optional<double> Storage::zincrby(const std::string& key, double increment, const std::string& member)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        // 键不存在，创建新集合
+        SortedSet ss;
+        ss.add(member, increment);
+        _store[key] = ValueWithExpiry(std::move(ss));
+        return increment;
+    }
+
+    if (it->second.type != ValueType::SORTED_SET) {
+        throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+    }
+
+    auto* ss = it->second.get_sorted_set_ptr();
+    if (!ss) {
+        throw std::runtime_error("Internal error: invalid sorted set");
+    }
+
+    auto old_score = ss->score(member);
+    double new_score = increment;
+
+    if (old_score.has_value()) {
+        new_score = old_score.value() + increment;
+        ss->remove(member);
+    }
+
+    ss->add(member, new_score);
+    return new_score;
+}
+
+std::optional<int> Storage::zrevrank(const std::string& key, const std::string& member)
+{
+    auto rank_opt = zrank(key, member);
+    if (!rank_opt) {
+        return std::nullopt;
+    }
+
+    auto card_opt = zcard(key);
+    if (!card_opt) {
+        return std::nullopt;
+    }
+
+    return card_opt.value() - 1 - rank_opt.value();
+}
+std::optional<std::vector<std::string>> Storage::zrevrange(
+    const std::string& key, int start, int stop)
+{
+    auto range_opt = zrange(key, start, stop);
+    if (!range_opt) {
+        return std::nullopt;
+    }
+
+    std::reverse(range_opt->begin(), range_opt->end());
+    return range_opt;
+}
+std::optional<std::pair<std::string, double>> Storage::zpopmin(const std::string& key)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end() || it->second.type != ValueType::SORTED_SET) {
+        return std::nullopt;
+    }
+
+    auto* ss = it->second.get_sorted_set_ptr();
+    if (!ss || ss->size() == 0) {
+        return std::nullopt;
+    }
+
+    auto members = ss->range_with_scores(0, 0);
+    if (members.empty()) {
+        return std::nullopt;
+    }
+
+    const auto& [member, score] = members[0];
+    ss->remove(member);
+
+    return std::make_pair(member, score);
+}
+std::optional<std::pair<std::string, double>> Storage::zpopmax(const std::string& key)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end() || it->second.type != ValueType::SORTED_SET) {
+        return std::nullopt;
+    }
+
+    auto* ss = it->second.get_sorted_set_ptr();
+    if (!ss || ss->size() == 0) {
+        return std::nullopt;
+    }
+
+    auto members = ss->range_with_scores(-1, -1);
+    if (members.empty()) {
+        return std::nullopt;
+    }
+
+    const auto& [member, score] = members[0];
+    ss->remove(member);
+
+    return std::make_pair(member, score);
+}
+
+std::optional<double> Storage::zscore(const std::string& key, const std::string& member)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end() || it->second.type != ValueType::SORTED_SET) {
+        return std::nullopt;
+    }
+
+    auto* ss = it->second.get_sorted_set_ptr();
+    if (!ss) {
+        return std::nullopt;
+    }
+
+    return ss->score(member);
+}
+
 /**
     列表操作****************************************************
 */

@@ -329,6 +329,9 @@ bool Server::load_rdb_file()
             storage.get_store()[key] = ValueWithExpiry(list_value);
 
             SPDLOG_DEBUG("Loaded list: {} with {} elements", key, list_value.size());
+        } else if (value.type == ValueType::SORTED_SET) {
+            SortedSet sorted_set_value = std::get<SortedSet>(value.value);
+            storage.get_store()[key] = ValueWithExpiry(sorted_set_value);
         } else {
             SPDLOG_WARN("Unknown type for key: {}", key);
         }

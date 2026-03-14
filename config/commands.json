@@ -251,6 +251,98 @@
             "min_args": 1,
             "max_args": 1,
             "description": "Get the time to live for a key in milliseconds"
+        },
+        {
+            "name": "ZADD",
+            "handler": "zadd",
+            "min_args": 3,
+            "max_args": 3,
+            "description": "Add a member to a sorted set"
+        },
+        {
+            "name": "ZRANK",
+            "handler": "zrank",
+            "min_args": 2,
+            "max_args": 2,
+            "description": "Get the rank of a member in a sorted set"
+        },
+        {
+            "name": "ZRANGE",
+            "handler": "zrange",
+            "min_args": 3,
+            "max_args": 4,
+            "description": "Get a range of members from a sorted set"
+        },
+        {
+            "name": "ZREVRANGES",
+            "handler": "zrevrange",
+            "min_args": 3,
+            "max_args": 3,
+            "description": "Get a range of members from a sorted set, by score, with scores ordered from high to low"
+        },
+        {
+            "name": "ZRANGEWITHSCORES",
+            "handler": "zrangewithscores",
+            "min_args": 3,
+            "max_args": 3,
+            "description": "Get a range of members with scores from a sorted set"
+        },
+        {
+            "name": "ZREVRANGE",
+            "handler": "zrevrange",
+            "min_args": 3,
+            "max_args": 4,
+            "description": "Get a range of members from a sorted set in reverse order"
+        },
+        {
+            "name": "ZSCORE",
+            "handler": "zscore",
+            "min_args": 2,
+            "max_args": 2,
+            "description": "Get the score of a member in a sorted set"
+        },
+        {
+            "name": "ZCARD",
+            "handler": "zcard",
+            "min_args": 1,
+            "max_args": 1,
+            "description": "Get the number of members in a sorted set"
+        },
+        {
+            "name": "ZREM",
+            "handler": "zrem",
+            "min_args": 2,
+            "max_args": 2,
+            "description": "Remove a member from a sorted set"
+        },
+        {
+            "name": "ZCOUNT",
+            "handler": "zcount",
+            "min_args": 3,
+            "max_args": 3,
+            "description": "Count members with scores within a range"
+        },
+        {
+            "name": "ZINCRBY",
+            "handler": "zincrby",
+            "min_args": 3,
+            "max_args": 3,
+            "description": "Increment the score of a member"
+        },
+        {
+            "name": "ZPOPMIN",
+            "handler": "zpopmin",
+            "min_args": 1,
+            "max_args": 1,
+            "description": "Remove and return the member with the lowest score"
+        },
+        {
+            "name": "ZPOPMAX",
+            "handler": "zpopmax",
+            "min_args": 1,
+            "max_args": 1,
+            "description": "Remove and return the member with the highest score"
         }
+
     ]
 }

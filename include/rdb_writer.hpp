@@ -27,6 +27,7 @@ private:
     void write_length(size_t len);
     void write_string(const std::string& str);
     void write_list(const ListValue& list);
+    void write_sorted_set(const SortedSet& set);
 
     // 写入各部分
     void write_header();

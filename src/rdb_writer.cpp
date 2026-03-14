@@ -80,6 +80,21 @@ void RDBWriter::write_list(const ListValue& list)
     }
 }
 
+void RDBWriter::write_sorted_set(const SortedSet& set)
+{
+    auto members = set.range_with_scores(0, -1); // 假设有这个方法来获取所有成员
+    // 写入成员数量
+    write_length(members.size());
+
+    // 写入每个成员及其分数
+    for (const auto& [member, score] : members) {
+        // 先写成员名
+        write_string(member);
+        // 再写分数（双精度浮点数）
+        write_string(std::to_string(score));
+    }
+}
+
 void RDBWriter::write_header()
 {
     // "REDIS0011"
@@ -155,8 +170,11 @@ void RDBWriter::write_database(const std::unordered_map<std::string, ValueWithEx
             write_byte(1); // 列表类型
             write_string(key);
             write_list(std::get<ListValue>(value.value));
+        } else if (value.type == ValueType::SORTED_SET) {
+            write_byte(2); // 有序集合类型
+            write_string(key);
+            write_sorted_set(std::get<SortedSet>(value.value));
         }
-        // 其他类型...
     }
 }
 

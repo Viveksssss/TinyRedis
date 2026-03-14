@@ -557,6 +557,7 @@ void Session::do_write_replica()
 
 Task<void> Session::process_command_co(const std::vector<std::string>& command)
 {
+
     // 1. 基本校验
     if (command.empty()) {
         do_write(RESPEncoder::encode_error("empty command"));

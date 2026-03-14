@@ -153,6 +153,20 @@ ListValue RDBParser::read_list()
     return list;
 }
 
+SortedSet RDBParser::read_sorted_set()
+{
+    SortedSet sorted_set;
+    uint32_t set_len;
+    read_length(set_len);
+
+    for (uint32_t i = 0; i < set_len; i++) {
+        std::string element = read_string();
+        double score = std::stof(read_string());
+        sorted_set.add(element, score);
+    }
+    return sorted_set;
+}
+
 uint64_t RDBParser::read_uint64()
 {
     uint8_t bytes[8];
@@ -314,17 +328,7 @@ bool RDBParser::parse_key_value_pair(uint32_t db_number, uint32_t num_keys)
             value = read_list();
             break;
         case 2: // Set
-            // 跳过Set数据（暂时不支持）
-            {
-                uint32_t set_len;
-                read_length(set_len);
-                for (uint32_t i = 0; i < set_len; i++) {
-                    read_string(); // 读取并丢弃
-                }
-                // 创建一个空的ListValue作为占位
-                value = ListValue {};
-                value.type = ValueType::LIST; // 临时使用LIST类型
-            }
+            value = read_sorted_set();
             break;
         default:
             return false;

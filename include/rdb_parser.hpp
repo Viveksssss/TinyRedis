@@ -28,6 +28,8 @@ private:
     std::size_t read_length(uint32_t& len);
     std::string read_string();
     ListValue read_list();
+    SortedSet read_sorted_set();
+
     uint64_t read_uint64();
     uint32_t read_uint32();
     uint8_t peek_byte();

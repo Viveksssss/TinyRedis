@@ -26,6 +26,20 @@ public:
     static std::string ttl(const std::vector<std::string>& args);
     static std::string pttl(const std::vector<std::string>& args);
 
+    // 有序集合
+    static std::string zadd(const std::vector<std::string>& args);
+    static std::string zrank(const std::vector<std::string>& args);
+    static std::string zrange(const std::vector<std::string>& args);
+    static std::string zrangewithscores(const std::vector<std::string>& args);
+    static std::string zrevrange(const std::vector<std::string>& args);
+    static std::string zscore(const std::vector<std::string>& args);
+    static std::string zcard(const std::vector<std::string>& args);
+    static std::string zrem(const std::vector<std::string>& args);
+    static std::string zcount(const std::vector<std::string>& args);
+    static std::string zincrby(const std::vector<std::string>& args);
+    static std::string zpopmin(const std::vector<std::string>& args);
+    static std::string zpopmax(const std::vector<std::string>& args);
+
     // 列表命令
     static std::string rpush(const std::vector<std::string>& args);
     static std::string lpush(const std::vector<std::string>& args);

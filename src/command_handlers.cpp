@@ -67,6 +67,19 @@ void CommandHandlers::register_all()
     registry.register_handler("brpop", brpop);
     registry.register_handler("blpop", blpop);
 
+    registry.register_handler("zadd", zadd);
+    registry.register_handler("zrank", zrank);
+    registry.register_handler("zrange", zrange);
+    registry.register_handler("zrangewithscores", zrangewithscores);
+    registry.register_handler("zrevrange", zrevrange);
+    registry.register_handler("zscore", zscore);
+    registry.register_handler("zcard", zcard);
+    registry.register_handler("zrem", zrem);
+    registry.register_handler("zcount", zcount);
+    registry.register_handler("zincrby", zincrby);
+    registry.register_handler("zpopmin", zpopmin);
+    registry.register_handler("zpopmax", zpopmax);
+
     registry.register_handler("xadd", xadd);
     registry.register_handler("xrange", xrange);
     registry.register_handler("xread", xread);
@@ -266,6 +279,343 @@ std::string CommandHandlers::pttl(const std::vector<std::string>& args)
     int64_t remaining = storage.pttl(key);
 
     return RESPEncoder::encode_integer(remaining);
+}
+
+std::string CommandHandlers::zadd(const std::vector<std::string>& args)
+{
+    if (args.size() != 4) {
+        return RESPEncoder::encode_error("wrong number of arguments for 'zadd' command");
+    }
+
+    const std::string& key = args[1];
+    const std::string& score_str = args[2];
+    const std::string& member = args[3];
+
+    auto& storage = Storage::instance();
+    try {
+        int added = storage.zadd(key, std::stof(score_str), member);
+        return RESPEncoder::encode_integer(added);
+    } catch (const std::exception& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::zrank(const std::vector<std::string>& args)
+{
+    if (args.size() != 3) {
+        return RESPEncoder::encode_error("wrong number of arguments for 'zrank' command");
+    }
+
+    const std::string& key = args[1];
+    const std::string& member = args[2];
+
+    auto& storage = Storage::instance();
+
+    try {
+        auto rank_opt = storage.zrank(key, member);
+
+        if (!rank_opt) {
+            // 键或成员不存在，返回 null bulk string
+            return RESPEncoder::encode_null_bulk_string();
+        }
+
+        return RESPEncoder::encode_integer(*rank_opt);
+
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::zrange(const std::vector<std::string>& args)
+{
+    if (args.size() < 4 || args.size() > 5) {
+        return RESPEncoder::encode_error("wrong number of arguments for 'zrange' command");
+    }
+
+    bool withscores = args.size() == 5;
+
+    if (withscores) {
+        auto choice = args[4];
+        for (auto& c : choice) {
+            c = tolower(c);
+        }
+        if (choice != "withscores") {
+            return RESPEncoder::encode_error("syntax error");
+        }
+    }
+
+    const std::string& key = args[1];
+
+    // 解析 start 和 stop 参数
+    int start, stop;
+    try {
+        start = std::stoi(args[2]);
+        stop = std::stoi(args[3]);
+    } catch (const std::exception& e) {
+        return RESPEncoder::encode_error("value is not an integer or out of range");
+    }
+
+    auto& storage = Storage::instance();
+
+    try {
+
+        std::vector<std::string> results;
+        if (withscores) {
+            auto range_opt = storage.zrangewithscores(key, start, stop);
+            if (range_opt) {
+
+                for (const auto& [member, value] : *range_opt) {
+                    results.push_back(member);
+                    results.push_back(std::to_string(value));
+                }
+            }
+        } else {
+
+            auto range_opt = storage.zrange(key, start, stop);
+            if (range_opt) {
+                for (const auto& member : *range_opt) {
+                    results.push_back(member);
+                }
+            }
+        }
+
+        return RESPEncoder::encode_array(results);
+
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::zrevrange(const std::vector<std::string>& args)
+{
+    if (args.size() < 4 || args.size() > 5) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'zrevrange' command");
+    }
+
+    const std::string& key = args[1];
+    int start, stop;
+    try {
+        start = std::stoi(args[2]);
+        stop = std::stoi(args[3]);
+    } catch (...) {
+        return RESPEncoder::encode_error("ERR value is not an integer or out of range");
+    }
+
+    auto& storage = Storage::instance();
+
+    try {
+        auto range_opt = storage.zrevrange(key, start, stop);
+        if (!range_opt) {
+            return RESPEncoder::encode_array({});
+        }
+        return RESPEncoder::encode_array(*range_opt);
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::zrangewithscores(const std::vector<std::string>& args)
+{
+    if (args.size() != 4) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'zrange' command");
+    }
+
+    const std::string& key = args[1];
+
+    // 解析 start 和 stop 参数
+    int start, stop;
+    try {
+        start = std::stoi(args[2]);
+        stop = std::stoi(args[3]);
+    } catch (const std::exception& e) {
+        return RESPEncoder::encode_error("ERR value is not an integer or out of range");
+    }
+
+    auto& storage = Storage::instance();
+
+    try {
+        auto range_opt = storage.zrangewithscores(key, start, stop);
+
+        if (!range_opt) {
+            // 键不存在，返回空数组
+            return RESPEncoder::encode_array({});
+        }
+
+        const auto& members = *range_opt;
+        std::vector<std::string> range_with_scores;
+        for (const auto& [member, score] : members) {
+            range_with_scores.push_back(member);
+            range_with_scores.push_back(std::to_string(score));
+        }
+        return RESPEncoder::encode_array(range_with_scores);
+
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::zscore(const std::vector<std::string>& args)
+{
+    if (args.size() != 3) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'zscore' command");
+    }
+
+    const std::string& key = args[1];
+    const std::string& member = args[2];
+
+    auto& storage = Storage::instance();
+
+    try {
+        auto score_opt = storage.zscore(key, member);
+        if (!score_opt) {
+            return RESPEncoder::encode_null_bulk_string();
+        }
+        return RESPEncoder::encode_bulk_string(std::to_string(*score_opt));
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+std::string CommandHandlers::zcard(const std::vector<std::string>& args)
+{
+    if (args.size() != 2) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'zcard' command");
+    }
+
+    const std::string& key = args[1];
+
+    auto& storage = Storage::instance();
+
+    try {
+        auto card_opt = storage.zcard(key);
+        if (!card_opt) {
+            return RESPEncoder::encode_integer(0);
+        }
+        return RESPEncoder::encode_integer(*card_opt);
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+std::string CommandHandlers::zrem(const std::vector<std::string>& args)
+{
+    if (args.size() != 3) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'zrem' command");
+    }
+
+    const std::string& key = args[1];
+    const std::string& member = args[2];
+
+    auto& storage = Storage::instance();
+
+    try {
+        bool removed = storage.zrem(key, member);
+        return RESPEncoder::encode_integer(removed ? 1 : 0);
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+std::string CommandHandlers::zcount(const std::vector<std::string>& args)
+{
+    if (args.size() != 4) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'zcount' command");
+    }
+
+    const std::string& key = args[1];
+    double min, max;
+    try {
+        min = std::stod(args[2]);
+        max = std::stod(args[3]);
+    } catch (...) {
+        return RESPEncoder::encode_error("ERR value is not a valid float");
+    }
+
+    auto& storage = Storage::instance();
+
+    try {
+        auto count_opt = storage.zcount(key, min, max);
+        if (!count_opt) {
+            return RESPEncoder::encode_integer(0);
+        }
+        return RESPEncoder::encode_integer(*count_opt);
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+std::string CommandHandlers::zincrby(const std::vector<std::string>& args)
+{
+    if (args.size() != 4) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'zincrby' command");
+    }
+
+    const std::string& key = args[1];
+    double increment;
+    try {
+        increment = std::stod(args[2]);
+    } catch (...) {
+        return RESPEncoder::encode_error("ERR value is not a valid float");
+    }
+    const std::string& member = args[3];
+
+    auto& storage = Storage::instance();
+
+    try {
+        auto new_score = storage.zincrby(key, increment, member);
+        if (!new_score) {
+            return RESPEncoder::encode_null_bulk_string();
+        }
+        return RESPEncoder::encode_bulk_string(std::to_string(*new_score));
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+std::string CommandHandlers::zpopmin(const std::vector<std::string>& args)
+{
+    if (args.size() != 2) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'zpopmin' command");
+    }
+
+    const std::string& key = args[1];
+
+    auto& storage = Storage::instance();
+
+    try {
+        auto result = storage.zpopmin(key);
+        if (!result) {
+            return RESPEncoder::encode_null_bulk_string();
+        }
+
+        std::vector<std::string> response = {
+            result->first,
+            std::to_string(result->second)
+        };
+        return RESPEncoder::encode_array(response);
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+std::string CommandHandlers::zpopmax(const std::vector<std::string>& args)
+{
+    if (args.size() != 2) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'zpopmax' command");
+    }
+
+    const std::string& key = args[1];
+
+    auto& storage = Storage::instance();
+
+    try {
+        auto result = storage.zpopmax(key);
+        if (!result) {
+            return RESPEncoder::encode_null_bulk_string();
+        }
+
+        std::vector<std::string> response = {
+            result->first,
+            std::to_string(result->second)
+        };
+        return RESPEncoder::encode_array(response);
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
 }
 
 std::string CommandHandlers::rpush(const std::vector<std::string>& args)
