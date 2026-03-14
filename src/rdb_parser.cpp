@@ -158,13 +158,25 @@ SortedSet RDBParser::read_sorted_set()
     SortedSet sorted_set;
     uint32_t set_len;
     read_length(set_len);
-
     for (uint32_t i = 0; i < set_len; i++) {
         std::string element = read_string();
         double score = std::stof(read_string());
         sorted_set.add(element, score);
     }
     return sorted_set;
+}
+
+HashValue RDBParser::read_hash()
+{
+    HashValue hash;
+    uint32_t field_count;
+    read_length(field_count);
+    for (uint32_t i = 0; i < field_count; i++) {
+        std::string field = read_string();
+        std::string value = read_string();
+        hash[field] = value;
+    }
+    return hash;
 }
 
 uint64_t RDBParser::read_uint64()
@@ -329,6 +341,9 @@ bool RDBParser::parse_key_value_pair(uint32_t db_number, uint32_t num_keys)
             break;
         case 2: // Set
             value = read_sorted_set();
+            break;
+        case 3:
+            value = read_hash();
             break;
         default:
             return false;

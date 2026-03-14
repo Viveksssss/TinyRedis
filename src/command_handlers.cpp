@@ -93,6 +93,21 @@ void CommandHandlers::register_all()
     registry.register_handler("keys", keys);
     registry.register_handler("save", save);
     registry.register_handler("bgsave", bgsave);
+
+    registry.register_handler("hset", hset);
+    registry.register_handler("hget", hget);
+    registry.register_handler("hgetall", hgetall);
+    registry.register_handler("hdel", hdel);
+    registry.register_handler("hexists", hexists);
+    registry.register_handler("hlen", hlen);
+    registry.register_handler("hkeys", hkeys);
+    registry.register_handler("hvals", hvals);
+    registry.register_handler("hmset", hmset);
+    registry.register_handler("hmget", hmget);
+    registry.register_handler("hincrby", hincrby);
+    registry.register_handler("hincrbyfloat", hincrbyfloat);
+    registry.register_handler("hsetnx", hsetnx);
+    registry.register_handler("hstrlen", hstrlen);
 }
 
 std::string CommandHandlers::ping(const std::vector<std::string>& args)
@@ -1400,6 +1415,329 @@ std::string CommandHandlers::bgsave(const std::vector<std::string>& args)
     }
     _server->add_condition(timeout, frequency);
     return RESPEncoder::encode_null_bulk_string();
+}
+
+std::string CommandHandlers::hset(const std::vector<std::string>& args)
+{
+    if (args.size() != 4) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'hset' command");
+    }
+
+    const std::string& key = args[1];
+    const std::string& field = args[2];
+    const std::string& value = args[3];
+
+    auto& storage = Storage::instance();
+
+    try {
+        int added = storage.hset(key, field, value);
+        return RESPEncoder::encode_integer(added);
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::hget(const std::vector<std::string>& args)
+{
+    if (args.size() != 3) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'hget' command");
+    }
+
+    const std::string& key = args[1];
+    const std::string& field = args[2];
+
+    auto& storage = Storage::instance();
+
+    try {
+        auto value_opt = storage.hget(key, field);
+        if (!value_opt) {
+            return RESPEncoder::encode_null_bulk_string();
+        }
+        return RESPEncoder::encode_bulk_string(*value_opt);
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::hgetall(const std::vector<std::string>& args)
+{
+    if (args.size() != 2) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'hgetall' command");
+    }
+
+    const std::string& key = args[1];
+
+    auto& storage = Storage::instance();
+
+    try {
+        auto hash_opt = storage.hgetall(key);
+        if (!hash_opt) {
+            return RESPEncoder::encode_array({});
+        }
+
+        std::vector<std::string> result;
+        for (const auto& [field, value] : *hash_opt) {
+            result.push_back(field);
+            result.push_back(value);
+        }
+
+        return RESPEncoder::encode_array(result);
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::hdel(const std::vector<std::string>& args)
+{
+    if (args.size() < 3) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'hdel' command");
+    }
+
+    const std::string& key = args[1];
+    std::vector<std::string> fields(args.begin() + 2, args.end());
+
+    auto& storage = Storage::instance();
+
+    try {
+        int deleted = storage.hdel(key, fields);
+        return RESPEncoder::encode_integer(deleted);
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::hexists(const std::vector<std::string>& args)
+{
+    if (args.size() != 3) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'hexists' command");
+    }
+
+    const std::string& key = args[1];
+    const std::string& field = args[2];
+
+    auto& storage = Storage::instance();
+
+    try {
+        bool exists = storage.hexists(key, field);
+        return RESPEncoder::encode_integer(exists ? 1 : 0);
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::hlen(const std::vector<std::string>& args)
+{
+    if (args.size() != 2) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'hlen' command");
+    }
+
+    const std::string& key = args[1];
+
+    auto& storage = Storage::instance();
+
+    try {
+        auto len_opt = storage.hlen(key);
+        if (!len_opt) {
+            return RESPEncoder::encode_integer(0);
+        }
+        return RESPEncoder::encode_integer(*len_opt);
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::hkeys(const std::vector<std::string>& args)
+{
+    if (args.size() != 2) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'hkeys' command");
+    }
+
+    const std::string& key = args[1];
+
+    auto& storage = Storage::instance();
+
+    try {
+        auto keys_opt = storage.hkeys(key);
+        if (!keys_opt) {
+            return RESPEncoder::encode_array({});
+        }
+        return RESPEncoder::encode_array(*keys_opt);
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::hvals(const std::vector<std::string>& args)
+{
+    if (args.size() != 2) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'hvals' command");
+    }
+
+    const std::string& key = args[1];
+
+    auto& storage = Storage::instance();
+
+    try {
+        auto vals_opt = storage.hvals(key);
+        if (!vals_opt) {
+            return RESPEncoder::encode_array({});
+        }
+        return RESPEncoder::encode_array(*vals_opt);
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::hmset(const std::vector<std::string>& args)
+{
+    if (args.size() < 4 || (args.size() - 2) % 2 != 0) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'hmset' command");
+    }
+
+    const std::string& key = args[1];
+    std::vector<std::pair<std::string, std::string>> field_values;
+
+    for (size_t i = 2; i < args.size(); i += 2) {
+        field_values.emplace_back(args[i], args[i + 1]);
+    }
+
+    auto& storage = Storage::instance();
+
+    try {
+        storage.hmset(key, field_values);
+        return RESPEncoder::encode_simple_string("OK");
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::hmget(const std::vector<std::string>& args)
+{
+    if (args.size() < 3) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'hmget' command");
+    }
+
+    const std::string& key = args[1];
+    std::vector<std::string> fields(args.begin() + 2, args.end());
+
+    auto& storage = Storage::instance();
+
+    try {
+        auto values = storage.hmget(key, fields);
+
+        std::vector<std::string> result;
+        for (const auto& val_opt : values) {
+            if (val_opt) {
+                result.push_back(*val_opt);
+            } else {
+                result.push_back("");
+            }
+        }
+
+        return RESPEncoder::encode_array(result);
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::hincrby(const std::vector<std::string>& args)
+{
+    if (args.size() != 4) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'hincrby' command");
+    }
+
+    const std::string& key = args[1];
+    const std::string& field = args[2];
+
+    int64_t increment;
+    try {
+        increment = std::stoll(args[3]);
+    } catch (...) {
+        return RESPEncoder::encode_error("ERR value is not an integer");
+    }
+
+    auto& storage = Storage::instance();
+
+    try {
+        auto new_value = storage.hincrby(key, field, increment);
+        if (!new_value) {
+            return RESPEncoder::encode_error("ERR increment failed");
+        }
+        return RESPEncoder::encode_integer(*new_value);
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::hincrbyfloat(const std::vector<std::string>& args)
+{
+    if (args.size() != 4) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'hincrbyfloat' command");
+    }
+
+    const std::string& key = args[1];
+    const std::string& field = args[2];
+
+    double increment;
+    try {
+        increment = std::stod(args[3]);
+    } catch (...) {
+        return RESPEncoder::encode_error("ERR value is not a valid float");
+    }
+
+    auto& storage = Storage::instance();
+
+    try {
+        auto new_value = storage.hincrbyfloat(key, field, increment);
+        if (!new_value) {
+            return RESPEncoder::encode_error("ERR increment failed");
+        }
+        return RESPEncoder::encode_bulk_string(std::to_string(*new_value));
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::hsetnx(const std::vector<std::string>& args)
+{
+    if (args.size() != 4) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'hsetnx' command");
+    }
+
+    const std::string& key = args[1];
+    const std::string& field = args[2];
+    const std::string& value = args[3];
+
+    auto& storage = Storage::instance();
+
+    try {
+        bool set = storage.hsetnx(key, field, value);
+        return RESPEncoder::encode_integer(set ? 1 : 0);
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
+}
+
+std::string CommandHandlers::hstrlen(const std::vector<std::string>& args)
+{
+    if (args.size() != 3) {
+        return RESPEncoder::encode_error("ERR wrong number of arguments for 'hstrlen' command");
+    }
+
+    const std::string& key = args[1];
+    const std::string& field = args[2];
+
+    auto& storage = Storage::instance();
+
+    try {
+        auto len_opt = storage.hstrlen(key, field);
+        if (!len_opt) {
+            return RESPEncoder::encode_integer(0);
+        }
+        return RESPEncoder::encode_integer(*len_opt);
+    } catch (const std::runtime_error& e) {
+        return RESPEncoder::encode_error(e.what());
+    }
 }
 
 } // namespace

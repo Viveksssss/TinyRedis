@@ -1549,6 +1549,384 @@ std::optional<std::size_t> Storage::incr(const std::string& key)
     }
 }
 
+int Storage::hset(const std::string& key, const std::string& field, const std::string& value)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        // 键不存在，创建新的哈希表
+        HashValue hash;
+        hash[field] = value;
+        _store[key] = ValueWithExpiry(std::move(hash));
+        return 1; // 新字段
+    }
+
+    if (it->second.type != ValueType::HASH) {
+        throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+    }
+
+    auto* hash = it->second.get_hash_ptr();
+    if (!hash) {
+        throw std::runtime_error("Internal error: invalid hash");
+    }
+
+    bool is_new = hash->find(field) == hash->end();
+    (*hash)[field] = value;
+
+    return is_new ? 1 : 0; // 返回新增的字段数量
+}
+
+std::optional<std::string> Storage::hget(const std::string& key, const std::string& field)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end() || it->second.type != ValueType::HASH) {
+        return std::nullopt;
+    }
+
+    auto* hash = it->second.get_hash_ptr();
+    if (!hash) {
+        return std::nullopt;
+    }
+
+    auto field_it = hash->find(field);
+    if (field_it == hash->end()) {
+        return std::nullopt;
+    }
+
+    return field_it->second;
+}
+
+std::optional<HashValue> Storage::hgetall(const std::string& key)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end() || it->second.type != ValueType::HASH) {
+        return std::nullopt;
+    }
+
+    auto* hash = it->second.get_hash_ptr();
+    if (!hash) {
+        return std::nullopt;
+    }
+
+    return *hash;
+}
+
+int Storage::hdel(const std::string& key, const std::vector<std::string>& fields)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end() || it->second.type != ValueType::HASH) {
+        return 0;
+    }
+
+    auto* hash = it->second.get_hash_ptr();
+    if (!hash) {
+        return 0;
+    }
+
+    int deleted = 0;
+    for (const auto& field : fields) {
+        if (hash->erase(field) > 0) {
+            deleted++;
+        }
+    }
+
+    // 如果哈希表为空，可以选择删除键
+    if (hash->empty()) {
+        _store.erase(it);
+    }
+
+    return deleted;
+}
+
+bool Storage::hexists(const std::string& key, const std::string& field)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end() || it->second.type != ValueType::HASH) {
+        return false;
+    }
+
+    auto* hash = it->second.get_hash_ptr();
+    if (!hash) {
+        return false;
+    }
+
+    return hash->find(field) != hash->end();
+}
+
+std::optional<size_t> Storage::hlen(const std::string& key)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end() || it->second.type != ValueType::HASH) {
+        return std::nullopt;
+    }
+
+    auto* hash = it->second.get_hash_ptr();
+    if (!hash) {
+        return 0;
+    }
+
+    return hash->size();
+}
+
+std::optional<std::vector<std::string>> Storage::hkeys(const std::string& key)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end() || it->second.type != ValueType::HASH) {
+        return std::nullopt;
+    }
+
+    auto* hash = it->second.get_hash_ptr();
+    if (!hash) {
+        return std::vector<std::string> {};
+    }
+
+    std::vector<std::string> keys;
+    keys.reserve(hash->size());
+    for (const auto& [field, _] : *hash) {
+        keys.push_back(field);
+    }
+
+    return keys;
+}
+
+std::optional<std::vector<std::string>> Storage::hvals(const std::string& key)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end() || it->second.type != ValueType::HASH) {
+        return std::nullopt;
+    }
+
+    auto* hash = it->second.get_hash_ptr();
+    if (!hash) {
+        return std::vector<std::string> {};
+    }
+
+    std::vector<std::string> values;
+    values.reserve(hash->size());
+    for (const auto& [_, value] : *hash) {
+        values.push_back(value);
+    }
+
+    return values;
+}
+
+void Storage::hmset(const std::string& key, const std::vector<std::pair<std::string, std::string>>& field_values)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        HashValue hash;
+        for (const auto& [field, value] : field_values) {
+            hash[field] = value;
+        }
+        _store[key] = ValueWithExpiry(std::move(hash));
+        return;
+    }
+
+    if (it->second.type != ValueType::HASH) {
+        throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+    }
+
+    auto* hash = it->second.get_hash_ptr();
+    if (!hash) {
+        throw std::runtime_error("Internal error: invalid hash");
+    }
+
+    for (const auto& [field, value] : field_values) {
+        (*hash)[field] = value;
+    }
+}
+
+std::vector<std::optional<std::string>> Storage::hmget(const std::string& key, const std::vector<std::string>& fields)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    std::vector<std::optional<std::string>> result;
+
+    auto it = _store.find(key);
+    if (it == _store.end() || it->second.type != ValueType::HASH) {
+        // 键不存在，所有字段都返回 nullopt
+        result.resize(fields.size(), std::nullopt);
+        return result;
+    }
+
+    auto* hash = it->second.get_hash_ptr();
+    if (!hash) {
+        result.resize(fields.size(), std::nullopt);
+        return result;
+    }
+
+    for (const auto& field : fields) {
+        auto field_it = hash->find(field);
+        if (field_it != hash->end()) {
+            result.push_back(field_it->second);
+        } else {
+            result.push_back(std::nullopt);
+        }
+    }
+
+    return result;
+}
+
+std::optional<int64_t> Storage::hincrby(const std::string& key, const std::string& field, int64_t increment)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        // 键不存在，创建新哈希
+        HashValue hash;
+        hash[field] = std::to_string(increment);
+        _store[key] = ValueWithExpiry(std::move(hash));
+        return increment;
+    }
+
+    if (it->second.type != ValueType::HASH) {
+        throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+    }
+
+    auto* hash = it->second.get_hash_ptr();
+    if (!hash) {
+        throw std::runtime_error("Internal error: invalid hash");
+    }
+
+    auto field_it = hash->find(field);
+    int64_t current = 0;
+
+    if (field_it != hash->end()) {
+        try {
+            current = std::stoll(field_it->second);
+        } catch (...) {
+            throw std::runtime_error("ERR hash value is not an integer");
+        }
+    }
+
+    int64_t new_value = current + increment;
+    (*hash)[field] = std::to_string(new_value);
+
+    return new_value;
+}
+
+std::optional<double> Storage::hincrbyfloat(const std::string& key, const std::string& field, double increment)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        // 键不存在，创建新哈希
+        HashValue hash;
+        hash[field] = std::to_string(increment);
+        _store[key] = ValueWithExpiry(std::move(hash));
+        return increment;
+    }
+
+    if (it->second.type != ValueType::HASH) {
+        throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+    }
+
+    auto* hash = it->second.get_hash_ptr();
+    if (!hash) {
+        throw std::runtime_error("Internal error: invalid hash");
+    }
+
+    auto field_it = hash->find(field);
+    double current = 0;
+
+    if (field_it != hash->end()) {
+        try {
+            current = std::stod(field_it->second);
+        } catch (...) {
+            throw std::runtime_error("ERR hash value is not a float");
+        }
+    }
+
+    double new_value = current + increment;
+    (*hash)[field] = std::to_string(new_value);
+
+    return new_value;
+}
+
+bool Storage::hsetnx(const std::string& key, const std::string& field, const std::string& value)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        // 键不存在，创建新哈希
+        HashValue hash;
+        hash[field] = value;
+        _store[key] = ValueWithExpiry(std::move(hash));
+        return true; // 设置成功
+    }
+
+    if (it->second.type != ValueType::HASH) {
+        throw std::runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+    }
+
+    auto* hash = it->second.get_hash_ptr();
+    if (!hash) {
+        throw std::runtime_error("Internal error: invalid hash");
+    }
+
+    // 如果字段已存在，返回 false
+    if (hash->find(field) != hash->end()) {
+        return false;
+    }
+
+    (*hash)[field] = value;
+    return true;
+}
+
+std::optional<size_t> Storage::hstrlen(const std::string& key, const std::string& field)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end() || it->second.type != ValueType::HASH) {
+        return std::nullopt;
+    }
+
+    auto* hash = it->second.get_hash_ptr();
+    if (!hash) {
+        return 0;
+    }
+
+    auto field_it = hash->find(field);
+    if (field_it == hash->end()) {
+        return 0;
+    }
+
+    return field_it->second.size();
+}
+
+bool Storage::is_hash(const std::string& key) const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _store.find(key);
+    if (it == _store.end()) {
+        return false;
+    }
+
+    return it->second.type == ValueType::HASH;
+}
+
 void Storage::clean_expired_random()
 {
     // 1.循环检测

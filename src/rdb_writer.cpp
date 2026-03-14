@@ -1,5 +1,6 @@
 // rdb_writer.cpp
 #include "rdb_writer.hpp"
+#include "storage.hpp"
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -83,15 +84,19 @@ void RDBWriter::write_list(const ListValue& list)
 void RDBWriter::write_sorted_set(const SortedSet& set)
 {
     auto members = set.range_with_scores(0, -1); // 假设有这个方法来获取所有成员
-    // 写入成员数量
     write_length(members.size());
-
-    // 写入每个成员及其分数
     for (const auto& [member, score] : members) {
-        // 先写成员名
         write_string(member);
-        // 再写分数（双精度浮点数）
         write_string(std::to_string(score));
+    }
+}
+
+void RDBWriter::write_hash(const HashValue& hash)
+{
+    write_length(hash.size());
+    for (const auto& [field, value] : hash) {
+        write_string(field);
+        write_string(value);
     }
 }
 
@@ -174,6 +179,10 @@ void RDBWriter::write_database(const std::unordered_map<std::string, ValueWithEx
             write_byte(2); // 有序集合类型
             write_string(key);
             write_sorted_set(std::get<SortedSet>(value.value));
+        } else if (value.type == ValueType::HASH) {
+            write_byte(3);
+            write_string(key);
+            write_hash(std::get<HashValue>(value.value));
         }
     }
 }

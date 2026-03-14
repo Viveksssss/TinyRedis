@@ -25,7 +25,8 @@ enum class ValueType {
     STRING,
     LIST,
     STREAM,
-    SORTED_SET
+    SORTED_SET,
+    HASH
 };
 
 struct StreamEntry {
@@ -228,12 +229,14 @@ public:
     }
 };
 
+// HASH类型
+using HashValue = std::unordered_map<std::string, std::string>;
 /* 列表类型 */
 using ListValue = std::vector<std::string>;
 /* Stream类型 */
 using Stream = std::vector<StreamEntry>;
 /* 值的变体 */
-using ValueVariant = std::variant<std::string, ListValue, Stream, SortedSet>;
+using ValueVariant = std::variant<std::string, ListValue, Stream, SortedSet, HashValue>;
 /* 等待的客户端信息 */
 struct WaitingClient {
     std::string key;
@@ -339,6 +342,28 @@ struct ValueWithExpiry {
     {
     }
 
+    ValueWithExpiry(const HashValue& v)
+        : value(v)
+        , type(ValueType::HASH)
+        , has_expiry(false)
+    {
+    }
+
+    ValueWithExpiry(HashValue&& v)
+        : value(std::move(v))
+        , type(ValueType::HASH)
+        , has_expiry(false)
+    {
+    }
+
+    ValueWithExpiry(const HashValue& v, std::chrono::milliseconds ttl)
+        : value(v)
+        , type(ValueType::HASH)
+        , expiry(std::chrono::steady_clock::now() + ttl)
+        , has_expiry(true)
+    {
+    }
+
     bool is_expired() const
     {
         if (!has_expiry)
@@ -397,6 +422,21 @@ struct ValueWithExpiry {
         if (type != ValueType::SORTED_SET)
             return nullptr;
         return &std::get<SortedSet>(value);
+    }
+
+    std::optional<HashValue> get_hash() const
+    {
+        if (type != ValueType::HASH)
+            return std::nullopt;
+        return std::get<HashValue>(value);
+    }
+
+    // 获取 Hash 指针
+    HashValue* get_hash_ptr()
+    {
+        if (type != ValueType::HASH)
+            return nullptr;
+        return &std::get<HashValue>(value);
     }
 };
 
@@ -513,6 +553,40 @@ public:
     std::optional<ValueType> type(const std::string& key);
     /* 整形数值加1 */
     std::optional<std::size_t> incr(const std::string& key);
+
+    /**
+        HASH操作****************************************************
+    */
+    // HSET 操作
+    int hset(const std::string& key, const std::string& field, const std::string& value);
+    // HGET 操作
+    std::optional<std::string> hget(const std::string& key, const std::string& field);
+    // HGETALL 操作
+    std::optional<HashValue> hgetall(const std::string& key);
+    // HDEL 操作
+    int hdel(const std::string& key, const std::vector<std::string>& fields);
+    // HEXISTS 操作
+    bool hexists(const std::string& key, const std::string& field);
+    // HLEN 操作
+    std::optional<size_t> hlen(const std::string& key);
+    // HKEYS 操作
+    std::optional<std::vector<std::string>> hkeys(const std::string& key);
+    // HVALS 操作
+    std::optional<std::vector<std::string>> hvals(const std::string& key);
+    // HMSET 操作
+    void hmset(const std::string& key, const std::vector<std::pair<std::string, std::string>>& field_values);
+    // HMGET 操作
+    std::vector<std::optional<std::string>> hmget(const std::string& key, const std::vector<std::string>& fields);
+    // HINCRBY 操作
+    std::optional<int64_t> hincrby(const std::string& key, const std::string& field, int64_t increment);
+    // HINCRBYFLOAT 操作
+    std::optional<double> hincrbyfloat(const std::string& key, const std::string& field, double increment);
+    // HSETNX 操作
+    bool hsetnx(const std::string& key, const std::string& field, const std::string& value);
+    // HSTRLEN 操作
+    std::optional<size_t> hstrlen(const std::string& key, const std::string& field);
+    // 检查是否是 hash
+    bool is_hash(const std::string& key) const;
 
 private:
     Storage();

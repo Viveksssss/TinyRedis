@@ -28,6 +28,7 @@ private:
     void write_string(const std::string& str);
     void write_list(const ListValue& list);
     void write_sorted_set(const SortedSet& set);
+    void write_hash(const HashValue& hash);
 
     // 写入各部分
     void write_header();

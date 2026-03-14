@@ -69,6 +69,22 @@ public:
     static std::string keys(const std::vector<std::string>& args);
     static std::string save(const std::vector<std::string>& args);
     static std::string bgsave(const std::vector<std::string>& args);
+
+    // HASH 命令
+    static std::string hset(const std::vector<std::string>& args);
+    static std::string hget(const std::vector<std::string>& args);
+    static std::string hgetall(const std::vector<std::string>& args);
+    static std::string hdel(const std::vector<std::string>& args);
+    static std::string hexists(const std::vector<std::string>& args);
+    static std::string hlen(const std::vector<std::string>& args);
+    static std::string hkeys(const std::vector<std::string>& args);
+    static std::string hvals(const std::vector<std::string>& args);
+    static std::string hmset(const std::vector<std::string>& args);
+    static std::string hmget(const std::vector<std::string>& args);
+    static std::string hincrby(const std::vector<std::string>& args);
+    static std::string hincrbyfloat(const std::vector<std::string>& args);
+    static std::string hsetnx(const std::vector<std::string>& args);
+    static std::string hstrlen(const std::vector<std::string>& args);
 };
 
 }

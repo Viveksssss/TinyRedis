@@ -29,6 +29,7 @@ private:
     std::string read_string();
     ListValue read_list();
     SortedSet read_sorted_set();
+    HashValue read_hash();
 
     uint64_t read_uint64();
     uint32_t read_uint32();

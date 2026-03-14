@@ -342,6 +342,104 @@
             "min_args": 1,
             "max_args": 1,
             "description": "Remove and return the member with the highest score"
+        },
+        {
+            "name": "HSET",
+            "handler": "hset",
+            "min_args": 3,
+            "max_args": 3,
+            "description": "Set the value of a field in a hash"
+        },
+        {
+            "name": "HGET",
+            "handler": "hget",
+            "min_args": 2,
+            "max_args": 2,
+            "description": "Get the value of a field in a hash"
+        },
+        {
+            "name": "HGETALL",
+            "handler": "hgetall",
+            "min_args": 1,
+            "max_args": 1,
+            "description": "Get all fields and values in a hash"
+        },
+        {
+            "name": "HDEL",
+            "handler": "hdel",
+            "min_args": 2,
+            "max_args": -1,
+            "description": "Delete one or more fields from a hash"
+        },
+        {
+            "name": "HEXISTS",
+            "handler": "hexists",
+            "min_args": 2,
+            "max_args": 2,
+            "description": "Check if a field exists in a hash"
+        },
+        {
+            "name": "HLEN",
+            "handler": "hlen",
+            "min_args": 1,
+            "max_args": 1,
+            "description": "Get the number of fields in a hash"
+        },
+        {
+            "name": "HKEYS",
+            "handler": "hkeys",
+            "min_args": 1,
+            "max_args": 1,
+            "description": "Get all field names in a hash"
+        },
+        {
+            "name": "HVALS",
+            "handler": "hvals",
+            "min_args": 1,
+            "max_args": 1,
+            "description": "Get all values in a hash"
+        },
+        {
+            "name": "HMSET",
+            "handler": "hmset",
+            "min_args": 3,
+            "max_args": -1,
+            "description": "Set multiple fields in a hash"
+        },
+        {
+            "name": "HMGET",
+            "handler": "hmget",
+            "min_args": 2,
+            "max_args": -1,
+            "description": "Get multiple field values from a hash"
+        },
+        {
+            "name": "HINCRBY",
+            "handler": "hincrby",
+            "min_args": 3,
+            "max_args": 3,
+            "description": "Increment the integer value of a field by a number"
+        },
+        {
+            "name": "HINCRBYFLOAT",
+            "handler": "hincrbyfloat",
+            "min_args": 3,
+            "max_args": 3,
+            "description": "Increment the float value of a field by a number"
+        },
+        {
+            "name": "HSETNX",
+            "handler": "hsetnx",
+            "min_args": 3,
+            "max_args": 3,
+            "description": "Set the value of a field only if the field does not exist"
+        },
+        {
+            "name": "HSTRLEN",
+            "handler": "hstrlen",
+            "min_args": 2,
+            "max_args": 2,
+            "description": "Get the length of the value of a field"
         }
 
     ]

@@ -332,6 +332,9 @@ bool Server::load_rdb_file()
         } else if (value.type == ValueType::SORTED_SET) {
             SortedSet sorted_set_value = std::get<SortedSet>(value.value);
             storage.get_store()[key] = ValueWithExpiry(sorted_set_value);
+        } else if (value.type == ValueType::HASH) {
+            HashValue hash = std::get<HashValue>(value.value);
+            storage.get_store()[key] = ValueWithExpiry(hash);
         } else {
             SPDLOG_WARN("Unknown type for key: {}", key);
         }
