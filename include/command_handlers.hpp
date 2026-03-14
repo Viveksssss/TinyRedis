@@ -85,6 +85,8 @@ public:
     static std::string hincrbyfloat(const std::vector<std::string>& args);
     static std::string hsetnx(const std::vector<std::string>& args);
     static std::string hstrlen(const std::vector<std::string>& args);
+
+    static std::string auth(const std::vector<std::string>& args);
 };
 
 }

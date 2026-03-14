@@ -12,6 +12,7 @@ struct Config {
     bool is_replication = false;
     std::string master_host;
     std::uint16_t master_port;
+    std::string requirepass;
 
     std::string dir = ".";
     std::string db_filename = "dump.rdb";

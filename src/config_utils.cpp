@@ -53,7 +53,7 @@ Config from_args(int argc, char** argv)
                 throw std::runtime_error("--bind requires an argument");
             }
             config.bind = argv[i];
-        } else if (arg == "--replicaof") {
+        } else if (arg == "--replicaof" || arg == "-e") {
             if (++i >= argc) {
                 throw std::runtime_error("--replicaof requires an argument");
             }
@@ -66,16 +66,21 @@ Config from_args(int argc, char** argv)
             if (is_valid_address(config.master_host)) {
                 config.is_replication = true;
             }
-        } else if (arg == "--dir") {
+        } else if (arg == "--dir" || arg == "-d") {
             if (++i >= argc) {
                 throw std::runtime_error("--dir requires an argument");
             }
             config.dir = argv[i];
-        } else if (arg == "--dbfilename") {
+        } else if (arg == "--dbfilename" || arg == "-f") {
             if (++i >= argc) {
                 throw std::runtime_error("--dbfilename requires an argument");
             }
             config.db_filename = argv[i];
+        } else if (arg == "--requirepass" || arg == "-r") {
+            if (++i >= argc) {
+                throw std::runtime_error("--requirepass requires an argument");
+            }
+            config.requirepass = argv[i];
         } else {
             throw std::runtime_error(std::string("Unknown option: ") + std::string(arg));
         }
@@ -107,9 +112,13 @@ bool is_valid_address(const std::string& address)
 void print_usage()
 {
     std::cerr << "Options:\n"
-              << "  --port <port>     -p   Server port (default: 6379)\n"
-              << "  --bind <address>  -b   Bind address (default: 0.0.0.0)\n"
-              << "  --help            -h   Show this help message\n";
+              << "  --port <port>               -p   Server port (default: 6379)\n"
+              << "  --bind <address>            -b   Bind address (default: 0.0.0.0)\n"
+              << "  --replicaof <ip port>       -e   Select the ip and port as you primary endpoint"
+              << "  --dir <directory>           -d   Choose the directory where the rdb file to be\n"
+              << "  --dbfilename <filename>     -f   Choose the name of rdb file\n "
+              << "  --help                      -h   Show this help message\n"
+              << "  --requirepass <password>    -r   Set the password of server\n";
 }
 
 }

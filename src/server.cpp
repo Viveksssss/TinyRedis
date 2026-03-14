@@ -43,11 +43,12 @@ static std::string generate_id()
     return _repl_id;
 }
 
-Server::Server(boost::asio::io_context& io_context, const std::string& address, short port)
+Server::Server(boost::asio::io_context& io_context, const std::string& address, short port, const std::string& requirepass)
     : _io_context(io_context)
     , _acceptor(io_context)
     , _host(address)
     , _port(port)
+    , _requirepass(requirepass)
 {
 
     auto addr = boost::asio::ip::make_address(address);
@@ -68,8 +69,8 @@ Server::Server(boost::asio::io_context& io_context, const std::string& address, 
     do_accept();
 }
 
-Server::Server(boost::asio::io_context& io_context, const std::string& address, short port, const std::string& master_host, short master_port)
-    : Server(io_context, address, port)
+Server::Server(boost::asio::io_context& io_context, const std::string& address, short port, const std::string& master_host, short master_port, const std::string& requirepass)
+    : Server(io_context, address, port, requirepass)
 {
     _master_host = master_host;
     _master_port = master_port;
@@ -81,8 +82,8 @@ Server::Server(boost::asio::io_context& io_context, const std::string& address, 
 }
 
 Server::Server(boost::asio::io_context& io_context, const std::string& address, short port,
-    const std::string& dir, const std::string& dbfilename)
-    : Server(io_context, address, port) // 委托给基础构造函数
+    const std::string& dir, const std::string& dbfilename, const std::string& requirepass)
+    : Server(io_context, address, port, requirepass) // 委托给基础构造函数
 {
     _dir = dir;
     _db_filename = dbfilename;
@@ -94,8 +95,8 @@ Server::Server(boost::asio::io_context& io_context, const std::string& address, 
     });
 }
 
-Server::Server(boost::asio::io_context& io_context, const std::string& address, short port, const std::string& master_host, short master_port, const std::string& dir, const std::string& dbfilename)
-    : Server(io_context, address, port, master_host, master_port)
+Server::Server(boost::asio::io_context& io_context, const std::string& address, short port, const std::string& master_host, short master_port, const std::string& dir, const std::string& dbfilename, const std::string& requirepass)
+    : Server(io_context, address, port, master_host, master_port, requirepass)
 {
     _dir = dir;
     _db_filename = dbfilename;
@@ -253,6 +254,55 @@ bool Server::save_rdb_file()
 void Server::add_condition(std::size_t timeout, std::size_t frequency)
 {
     _save_conditions.push_back({ timeout, frequency });
+}
+
+bool Server::load_config(const std::string& config_file)
+{
+    std::ifstream file(config_file);
+    if (!file.is_open()) {
+        SPDLOG_WARN("Could not open config file: {}", config_file);
+        return false;
+    }
+    std::string line;
+    while (std::getline(file, line)) {
+        // 跳过注释和空行
+        if (line.empty() || line[0] == '#')
+            continue;
+
+        std::istringstream iss(line);
+        std::string directive;
+        iss >> directive;
+
+        if (directive == "requirepass") {
+            std::string password;
+            iss >> password;
+            _requirepass = password;
+            SPDLOG_INFO("Config: requirepass set");
+        }
+        // 可以添加其他配置指令
+        else if (directive == "port") {
+            int port;
+            iss >> port;
+            // 注意：端口通常在命令行指定，这里可以覆盖
+            SPDLOG_INFO("Config: port set to {}", port);
+        } else if (directive == "bind") {
+            std::string bind;
+            iss >> bind;
+            SPDLOG_INFO("Config: bind set to {}", bind);
+        } else if (directive == "dir") {
+            std::string dir;
+            iss >> dir;
+            _dir = dir;
+            SPDLOG_INFO("Config: dir set to {}", dir);
+        } else if (directive == "dbfilename") {
+            std::string dbfilename;
+            iss >> dbfilename;
+            _db_filename = dbfilename;
+            SPDLOG_INFO("Config: dbfilename set to {}", dbfilename);
+        }
+    }
+
+    return true;
 }
 
 void Server::set_save_conditions(const std::vector<SaveCondition>& conditions)

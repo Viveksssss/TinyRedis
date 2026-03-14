@@ -570,6 +570,44 @@ Task<void> Session::process_command_co(const std::vector<std::string>& command)
         c = std::toupper(c);
     }
 
+    if (cmd == "AUTH") {
+        if (command.size() != 2) {
+            do_write(RESPEncoder::encode_error("wrong number of arguments for 'auth' command"));
+            co_return;
+        }
+
+        if (_authenticated) {
+            do_write(RESPEncoder::encode_simple_string("OK"));
+            co_return;
+        }
+
+        std::string password = command[1];
+
+        if (!_server->requires_auth()) {
+            // 服务器没有设置密码，直接认证成功
+            _authenticated = true;
+            do_write(RESPEncoder::encode_error("AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?"));
+            co_return;
+        }
+
+        if (_server->check_password(password)) {
+            _authenticated = true;
+            do_write(RESPEncoder::encode_simple_string("OK"));
+        } else {
+            do_write(RESPEncoder::encode_error("invalid password"));
+        }
+
+        co_return;
+    }
+
+    if (_server->requires_auth() && !_authenticated) {
+        // 允许一些命令在未认证时执行
+        if (cmd != "QUIT") {
+            do_write(RESPEncoder::encode_error("NOAUTH Authentication required."));
+            co_return;
+        }
+    }
+
     // 从端
     if (_server->is_replication()) {
         size_t cmd_length = calculate_command_length(command);

@@ -18,12 +18,12 @@ namespace Redis {
 class Session;
 class Server : public std::enable_shared_from_this<Server> {
 public:
-    Server(boost::asio::io_context& io_context, const std::string& address, short port);
-    Server(boost::asio::io_context& io_context, const std::string& address, short port, const std::string& master_host, short master_port);
+    Server(boost::asio::io_context& io_context, const std::string& address, short port, const std::string& requirepass);
+    Server(boost::asio::io_context& io_context, const std::string& address, short port, const std::string& master_host, short master_port, const std::string& requirepass);
     Server(boost::asio::io_context& io_context, const std::string& address, short port,
-        const std::string& dir, const std::string& dbfilename);
+        const std::string& dir, const std::string& dbfilename, const std::string& requirepass);
     Server(boost::asio::io_context& io_context, const std::string& address, short port,
-        const std::string& master_host, short master_port, const std::string& dir, const std::string& dbfilename);
+        const std::string& master_host, short master_port, const std::string& dir, const std::string& dbfilename, const std::string& requirepass);
 
     void stop();
 
@@ -167,6 +167,18 @@ private:
     std::mutex _save_mutex;
     std::unique_ptr<std::thread> _save_monitor_thread;
     std::atomic<bool> _save_monitor_running { false };
+
+    /* auth/config */
+public:
+    void set_password(const std::string& password) { _requirepass = password; }
+    bool check_password(const std::string& password) const { return !_requirepass.empty() && _requirepass == password; }
+    bool requires_auth() const { return !_requirepass.empty(); }
+
+    // 配置文件
+    bool load_config(const std::string& config_file);
+
+private:
+    std::string _requirepass; // requirepass 配置
 };
 
 }

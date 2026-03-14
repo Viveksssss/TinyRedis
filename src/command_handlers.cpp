@@ -1740,4 +1740,14 @@ std::string CommandHandlers::hstrlen(const std::vector<std::string>& args)
     }
 }
 
+std::string auth(const std::vector<std::string>& args)
+{
+    if (args.size() != 2) {
+        return RESPEncoder::encode_error("wrong number of arguments for 'auth' command");
+    }
+
+    auto& storage = Storage::instance();
+    return RESPEncoder::encode_error("AUTH not implemented in handler");
+}
+
 } // namespace

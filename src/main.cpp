@@ -64,9 +64,9 @@ std::shared_ptr<Redis::Server> make_server(boost::asio::io_context& io, Redis::C
 {
     std::shared_ptr<Redis::Server> srv; // 用局部变量
     if (config.is_replication) {
-        srv = std::make_shared<Redis::Server>(io, config.bind, config.port, config.master_host, config.master_port);
+        srv = std::make_shared<Redis::Server>(io, config.bind, config.port, config.master_host, config.master_port,config.requirepass);
     } else {
-        srv = std::make_shared<Redis::Server>(io, config.bind, config.port, config.dir, config.db_filename);
+        srv = std::make_shared<Redis::Server>(io, config.bind, config.port, config.dir, config.db_filename,config.requirepass);
     }
     set_global_server(srv);
     if (config.is_replication) {

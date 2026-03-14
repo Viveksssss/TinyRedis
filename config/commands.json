@@ -440,7 +440,20 @@
             "min_args": 2,
             "max_args": 2,
             "description": "Get the length of the value of a field"
+        },
+        {
+            "name": "ACL",
+            "handler": "acl",
+            "min_args": 1,
+            "max_args": -1,
+            "description": "ACL commands"
+        },
+        {
+            "name": "AUTH",
+            "handler": "auth",
+            "min_args": 1,
+            "max_args": 1,
+            "description": "Authenticate to the server"
         }
-
     ]
 }

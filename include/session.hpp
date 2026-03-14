@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <memory>
 #include <queue>
+#include <string>
 #include <unordered_set>
 
 namespace Redis {
@@ -111,6 +112,15 @@ private:
     boost::asio::streambuf _repl_stream;
     std::array<char, 1024> _repl_read_buffer;
     ReplicationStep _replication_step { ReplicationStep::None };
+
+    /* auth */
+private:
+    bool _authenticated { false };
+
+public:
+    std::string handle_auth(const std::vector<std::string> args);
+    bool is_authenticated() const { return _authenticated; }
+    void set_authenticated(bool auth) { _authenticated = auth; }
 };
 
 }
